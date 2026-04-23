@@ -87,11 +87,12 @@ Target runtime: ~30s warm, ~2 min cold.
 **Job `test`:**
 - Matrix over Python 3.12 and 3.13.
 - Checkout.
-- Setup Python from matrix.
-- Install Poetry (pin a version, e.g. 1.8.x).
-- Cache `~/.cache/pypoetry` and `.venv`.
-- `poetry install --with dev` — baseline install only, **no `[full]` extras**. Tests the default install path users hit with `pip install noirdoc`. Keeps CI under 5 minutes and avoids pulling torch / spaCy / GLiNER weights.
-- `pytest -m "not slow"` — skips tests that load ML models (already marked via `[tool.pytest.ini_options] markers = ["slow: marks tests as slow (loading ML models)"]`).
+- Setup Python from matrix via `actions/setup-python` with `cache: "pip"`.
+- `pip install -e ".[dev]"` — baseline install only, **no `[full]` extras**. Tests the default install path users hit with `pip install noirdoc`. Keeps CI under 5 minutes and avoids pulling torch / GLiNER weights.
+- `python -m spacy download de_core_news_lg` — spaCy model required by the Presidio detector baseline.
+- `pytest -m "not slow"` — skips tests that load heavy ensemble ML models (already marked via `[tool.pytest.ini_options] markers = ["slow: marks tests as slow (loading ML models)"]`).
+
+Build backend is `hatchling` (PEP 621), not Poetry. No Poetry setup in CI.
 
 Slow / ensemble tests stay out of default CI. A separate opt-in workflow (`full-tests.yml`) can be added later when the ML-heavy test path needs regression coverage.
 
@@ -115,6 +116,6 @@ No feature flags, no staged rollout — this is dev tooling, not product.
 
 ## Open items deferred to execution
 
-- Exact Poetry pin version in CI (latest 1.8.x at implementation time).
 - Whether to use `actions/setup-python` + `pip install pre-commit` or the purpose-built `pre-commit/action@v3` composite action. Both work; pick the simpler one during implementation.
+- Whether tests actually load the spaCy model at runtime or mock it. `tests/test_model_manager.py` mocks; baseline detection tests may or may not import-and-load. If the download step turns out to be unnecessary, drop it in a follow-up. Leaving it in for safety on first green CI run.
 - Exact gitleaks version — v8.21.2 is the plan; bump to whatever is current at implementation time.
