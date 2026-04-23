@@ -1,0 +1,63 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Packaging
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+.eggs/
+pip-wheel-metadata/
+
+# Lock files (library — downstream should re-resolve)
+poetry.lock
+
+# Test / type / coverage artefacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local model cache and user data
+.noirdoc/
+
+# Build backends
+.hatch/

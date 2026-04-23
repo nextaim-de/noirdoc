@@ -1,0 +1,108 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "noirdoc"
+version = "0.1.0"
+description = "Local PII redaction and pseudonymization for documents."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "MIT"
+authors = [
+    { name = "Antonio Maiolo" },
+]
+keywords = [
+    "pii",
+    "redaction",
+    "pseudonymization",
+    "anonymization",
+    "privacy",
+    "gdpr",
+    "presidio",
+    "nlp",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+# Baseline: `pip install noirdoc`
+# Presidio-only detection + all file extractors + reversible mapper + CLI.
+# No ML weight downloads required on first run.
+dependencies = [
+    "pydantic>=2.0",
+    "structlog>=25.0.0",
+    "cryptography>=46.0.0",
+    "presidio-analyzer>=2.2.361",
+    "presidio-anonymizer>=2.2.361",
+    "spacy>=3.8",
+    "pypdfium2>=4.0.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+    "python-magic>=0.4.27",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+# `pip install noirdoc[full]` — ensemble detection (GLiNER + Flair).
+# Large ML weights; downloaded on first use or via `noirdoc models pull`.
+full = [
+    "gliner>=0.2.25",
+    "flair>=0.14",
+]
+
+# `pip install noirdoc[redis]` — distributed mapper backend.
+redis = [
+    "redis[hiredis]>=7.0.0",
+]
+
+# `pip install noirdoc[dev]` — contributor tooling.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.15.0",
+    "mypy>=1.19.1",
+    "fakeredis>=2.21.0",
+]
+
+[project.scripts]
+noirdoc = "noirdoc.cli:main"
+
+[project.urls]
+# TODO: set once the repo is created.
+# Homepage = "https://github.com/<org>/noirdoc"
+# Issues = "https://github.com/<org>/noirdoc/issues"
+# Changelog = "https://github.com/<org>/noirdoc/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/noirdoc"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["slow: marks tests as slow (loading ML models)"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["noirdoc"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
