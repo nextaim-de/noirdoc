@@ -25,7 +25,11 @@ def main() -> None:
 @click.option("--output-dir", type=click.Path(path_type=Path), help="Output directory (batch).")
 @click.option("--namespace", help="Persistent namespace for reversible pseudonyms.")
 @click.option(
-    "--language", "-l", default="de", type=click.Choice(["de", "en"]), show_default=True
+    "--language",
+    "-l",
+    default="de",
+    type=click.Choice(["de", "en"]),
+    show_default=True,
 )
 @click.option(
     "--detector",
@@ -71,7 +75,10 @@ def redact(
             continue
 
         out_path = _choose_output_path(
-            path, output=output, output_dir=output_dir, reconstructed=result.reconstructed
+            path,
+            output=output,
+            output_dir=output_dir,
+            reconstructed=result.reconstructed,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(result.output_bytes)
@@ -208,7 +215,8 @@ def models_pull(language: tuple[str, ...], gliner: bool, gliner_model: str) -> N
             GlinerDetector(model_name=gliner_model)
         except ImportError:
             click.echo(
-                "GLiNER not installed. Install with: pip install 'noirdoc[full]'", err=True
+                "GLiNER not installed. Install with: pip install 'noirdoc[full]'",
+                err=True,
             )
             sys.exit(1)
 

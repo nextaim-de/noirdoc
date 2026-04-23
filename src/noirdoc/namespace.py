@@ -64,7 +64,7 @@ class Namespace:
             plaintext = Fernet(key).decrypt(blob)
         except (InvalidToken, ValueError) as exc:
             raise RuntimeError(
-                f"Failed to decrypt namespace {self.name!r} — key/data mismatch"
+                f"Failed to decrypt namespace {self.name!r} — key/data mismatch",
             ) from exc
         data = json.loads(plaintext.decode("utf-8"))
         return PseudonymMapper.from_dict(data)
@@ -96,6 +96,4 @@ def list_namespaces(root: Path | str | None = None) -> list[str]:
     base = Path(root).expanduser() if root else DEFAULT_NAMESPACE_ROOT
     if not base.is_dir():
         return []
-    return sorted(
-        p.name for p in base.iterdir() if p.is_dir() and (p / _KEY_FILE).is_file()
-    )
+    return sorted(p.name for p in base.iterdir() if p.is_dir() and (p / _KEY_FILE).is_file())

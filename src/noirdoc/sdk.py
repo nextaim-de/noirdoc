@@ -23,7 +23,6 @@ from noirdoc.pseudonymization.mapper import PseudonymMapper
 if TYPE_CHECKING:
     from noirdoc.detection.base import BaseDetector
     from noirdoc.detection.ensemble import EnsembleDetector
-    from noirdoc.file_analysis.models import FileBlock
 
 Policy = Literal["pseudonymize", "extract_only"]
 DetectorChoice = Literal["presidio", "gliner", "ensemble"]
@@ -205,7 +204,7 @@ class Redactor:
         text = await extractor.extract_text(block)
         if text is None:
             raise RuntimeError(
-                f"Text extraction failed for {path.name}: {block.extraction_error}"
+                f"Text extraction failed for {path.name}: {block.extraction_error}",
             )
 
         block.extracted_text = text

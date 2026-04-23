@@ -1,0 +1,33 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+    -   id: check-yaml
+    -   id: debug-statements
+    -   id: name-tests-test
+        args: [--pytest-test-first]
+-   repo: https://github.com/asottile/add-trailing-comma
+    rev: v4.0.0
+    hooks:
+    -   id: add-trailing-comma
+-   repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+    -   id: pyupgrade
+        args: [--py312-plus]
+-   repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.1
+    hooks:
+    -   id: mypy
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.15.2
+  hooks:
+    - id: ruff-check
+      args: [--fix]
+    - id: ruff-format
+- repo: https://github.com/gitleaks/gitleaks
+  rev: v8.21.2
+  hooks:
+    - id: gitleaks
