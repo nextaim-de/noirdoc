@@ -5,12 +5,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- Baseline install (`pip install noirdoc`) crashed with `ModuleNotFoundError:
-  gliner` because the default `detector="ensemble"` eagerly imported GLiNER.
-  The ensemble now detects an absent GLiNER, falls back to Presidio-only with
-  a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
-  loudly when the `[full]` extra isn't installed.
+## [0.1.0] — 2026-04-24
+
+First public alpha on PyPI.
 
 ### Added
 - Initial scaffold: pyproject, MIT LICENSE, README, package skeleton.
@@ -31,3 +28,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `noirdoc` CLI (Click) with `redact`, `reveal`, `lookup`, `ns {list,show,delete}`,
   and `models pull` subcommands.
 - Project URLs in `pyproject.toml` (Repository, Issues, Changelog) for PyPI sidebar.
+
+### Fixed
+- Baseline install (`pip install noirdoc`) crashed with `ModuleNotFoundError:
+  gliner` because the default `detector="ensemble"` eagerly imported GLiNER.
+  The ensemble now detects an absent GLiNER, falls back to Presidio-only with
+  a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
+  loudly when the `[full]` extra isn't installed.
+
+[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.0
