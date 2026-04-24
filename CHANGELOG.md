@@ -5,6 +5,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Baseline install (`pip install noirdoc`) crashed with `ModuleNotFoundError:
+  gliner` because the default `detector="ensemble"` eagerly imported GLiNER.
+  The ensemble now detects an absent GLiNER, falls back to Presidio-only with
+  a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
+  loudly when the `[full]` extra isn't installed.
+
 ### Added
 - Initial scaffold: pyproject, MIT LICENSE, README, package skeleton.
 - Detection ensemble (Presidio + optional GLiNER + Flair) extracted from the

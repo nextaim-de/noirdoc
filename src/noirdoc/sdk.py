@@ -14,6 +14,7 @@ for callers that need finer control.
 from __future__ import annotations
 
 import asyncio
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -123,10 +124,23 @@ class Redactor:
             detectors.append(PresidioDetector(languages=[self._language]))
 
         if self._detector_choice in ("gliner", "ensemble"):
-            from noirdoc.detection.gliner_detector import GlinerDetector
-
-            gliner = await asyncio.to_thread(GlinerDetector, model_name=self._gliner_model)
-            detectors.append(gliner)
+            try:
+                from noirdoc.detection.gliner_detector import GlinerDetector
+            except ImportError:
+                if self._detector_choice == "gliner":
+                    raise  # User explicitly asked for GLiNER — fail loud.
+                warnings.warn(
+                    "GLiNER is not installed; using Presidio only. "
+                    "Install 'noirdoc[full]' for the ensemble detector.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                gliner = await asyncio.to_thread(
+                    GlinerDetector,
+                    model_name=self._gliner_model,
+                )
+                detectors.append(gliner)
 
         self._ensemble = EnsembleDetector(
             detectors=detectors,
