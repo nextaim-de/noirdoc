@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
+  <img src="https://raw.githubusercontent.com/nextaim-de/noirdoc/main/docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
 </p>
 
 <p align="center">
@@ -116,7 +116,7 @@ If you're working with German legal, medical, HR, or financial documents, this i
 | Plain text / CSV / MD / HTML | ✓      | ✓                   |
 | PPTX / images                | ✓      | ✗ (pass-through)    |
 
-PDF reveal is an open contribution target — see [CONTRIBUTING.md](CONTRIBUTING.md).
+PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md).
 
 ## Advanced: shared mapping storage
 
@@ -150,19 +150,19 @@ Don't want to run this yourself? **[Noirdoc Cloud](https://noirdoc.de)** is the 
 
 ## Contributing
 
-Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
+Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
 
 ## Security
 
-Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](SECURITY.md). Please don't open public issues for security bugs.
+Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](https://github.com/nextaim-de/noirdoc/blob/main/SECURITY.md). Please don't open public issues for security bugs.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
+See [CHANGELOG.md](https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
 
 ## License
 
-MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](LICENSE).
+MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](https://github.com/nextaim-de/noirdoc/blob/main/LICENSE).
 
 ---
 
