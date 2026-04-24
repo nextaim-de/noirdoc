@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "noirdoc"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local PII redaction and pseudonymization for documents."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -87,6 +87,18 @@ Repository    = "https://github.com/nextaim-de/noirdoc"
 Documentation = "https://github.com/nextaim-de/noirdoc#readme"
 Issues        = "https://github.com/nextaim-de/noirdoc/issues"
 Changelog     = "https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# Untagged checkouts (e.g. CI on a branch) resolve to a PEP 440 dev version
+# derived from the most recent tag. This fallback only kicks in when git
+# history is missing entirely (shallow clone without tags).
+fallback_version = "0.0.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/noirdoc/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/noirdoc"]

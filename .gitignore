@@ -62,5 +62,8 @@ Desktop.ini
 # Build backends
 .hatch/
 
+# hatch-vcs generated version file
+src/noirdoc/_version.py
+
 # Claude Code working notes (brainstorm plans + specs)
 docs/superpowers/

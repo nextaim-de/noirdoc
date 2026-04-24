@@ -1,0 +1,130 @@
+name: Release
+
+# Tag-triggered publish. Pre-release tags (a/b/rc/dev) go to TestPyPI;
+# final tags (vX.Y.Z, optionally .postN) go to PyPI. Auth via PyPI Trusted
+# Publishing (OIDC) — no secrets stored in GitHub. See docs/RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  determine:
+    name: Determine channel
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      channel: ${{ steps.pick.outputs.channel }}
+      repository-url: ${{ steps.pick.outputs.repository-url }}
+      prerelease: ${{ steps.pick.outputs.prerelease }}
+    steps:
+      - id: pick
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            echo "channel=pypi"                                          >> "$GITHUB_OUTPUT"
+            echo "repository-url=https://upload.pypi.org/legacy/"        >> "$GITHUB_OUTPUT"
+            echo "prerelease=false"                                      >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=testpypi"                                      >> "$GITHUB_OUTPUT"
+            echo "repository-url=https://test.pypi.org/legacy/"          >> "$GITHUB_OUTPUT"
+            echo "prerelease=true"                                       >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: determine
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs needs the full history to resolve the tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: pip install --upgrade build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Confirm version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          expected="${TAG#v}"
+          built=$(ls dist/*.whl | head -n1 | sed -E 's|.*/noirdoc-([^-]+)-.*|\1|')
+          echo "Tag expects: $expected"
+          echo "Wheel reports: $built"
+          test "$expected" = "$built"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to ${{ needs.determine.outputs.channel }}
+    runs-on: ubuntu-latest
+    needs: [determine, build]
+    timeout-minutes: 10
+    environment:
+      name: ${{ needs.determine.outputs.channel }}
+    permissions:
+      id-token: write      # OIDC for Trusted Publishing
+      attestations: write  # PEP 740 build provenance
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ needs.determine.outputs.repository-url }}
+          attestations: true
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [determine, publish]
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Extract changelog section for this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          # Pull the section between `## [<version>]` and the next `## [`.
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" {found=1; next}
+            found && /^## \[/ {exit}
+            found {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $TAG — see CHANGELOG.md for details." > release-notes.md
+          fi
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          prerelease: ${{ needs.determine.outputs.prerelease }}
+          files: dist/*
+          fail_on_unmatched_files: true

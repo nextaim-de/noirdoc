@@ -52,6 +52,10 @@ Tests go in `tests/test_presidio_detector.py`. Add both positive and negative ca
 - Update `CHANGELOG.md` under `## [Unreleased]` with a one-line entry in the appropriate subsection (`### Added`, `### Changed`, `### Fixed`).
 - CI must be green before review.
 
+## Releasing
+
+Only maintainers cut releases. The flow is tag-driven and uses PyPI Trusted Publishing — see [docs/RELEASING.md](docs/RELEASING.md) for the per-release checklist, the first-release rehearsal, and the one-time PyPI setup.
+
 ## Reporting bugs
 
 Open an issue at <https://github.com/nextaim-de/noirdoc/issues>. Include Python version, OS, the command or code that triggered the bug, and the traceback if any. A minimal reproducer helps a lot.
