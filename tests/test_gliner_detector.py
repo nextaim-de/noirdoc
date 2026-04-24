@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from noirdoc.detection.gliner_detector import GlinerDetector
+pytest.importorskip("gliner")
+
+from noirdoc.detection.gliner_detector import GlinerDetector  # noqa: E402
 
 pytestmark = pytest.mark.slow
 
