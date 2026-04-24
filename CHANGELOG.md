@@ -23,3 +23,4 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - High-level SDK: `noirdoc.redact(...)` and `noirdoc.Redactor(namespace=...)`.
 - `noirdoc` CLI (Click) with `redact`, `reveal`, `lookup`, `ns {list,show,delete}`,
   and `models pull` subcommands.
+- Project URLs in `pyproject.toml` (Repository, Issues, Changelog) for PyPI sidebar.

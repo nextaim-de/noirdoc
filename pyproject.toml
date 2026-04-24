@@ -12,6 +12,9 @@ license = "MIT"
 authors = [
     { name = "Antonio Maiolo" },
 ]
+maintainers = [
+    { name = "Nextaim GmbH", email = "hello@noirdoc.de" },
+]
 keywords = [
     "pii",
     "redaction",
@@ -79,10 +82,11 @@ dev = [
 noirdoc = "noirdoc.cli:main"
 
 [project.urls]
-# TODO: set once the repo is created.
-# Homepage = "https://github.com/<org>/noirdoc"
-# Issues = "https://github.com/<org>/noirdoc/issues"
-# Changelog = "https://github.com/<org>/noirdoc/blob/main/CHANGELOG.md"
+Homepage      = "https://noirdoc.de"
+Repository    = "https://github.com/nextaim-de/noirdoc"
+Documentation = "https://github.com/nextaim-de/noirdoc#readme"
+Issues        = "https://github.com/nextaim-de/noirdoc/issues"
+Changelog     = "https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/noirdoc"]
