@@ -75,9 +75,10 @@ Output:
 | `noirdoc redact <files>`     | Redact one or more files (accepts directories; `-o FILE` or `--output-dir DIR`).       |
 | `noirdoc reveal <file>`      | Reverse pseudonyms back to originals (DOCX / XLSX / plain; `--namespace` required).    |
 | `noirdoc lookup <token>`     | Resolve a pseudonym like `<<PERSON_1>>` to its original value.                         |
-| `noirdoc ns list`            | List persistent namespaces under `~/.noirdoc/namespaces/`.                             |
-| `noirdoc ns show <name>`     | Print the mapping summary for a namespace as JSON.                                     |
-| `noirdoc ns delete <name>`   | Delete a namespace (prompts for confirmation).                                         |
+| `noirdoc ns list`              | List persistent namespaces.                                                            |
+| `noirdoc ns summary <name>`    | Counts-only summary (entity totals + per-type counts). Safe to log.                    |
+| `noirdoc ns show <name> --unsafe` | Print the full pseudonym↔original mapping as JSON. **Reveals every original value.** Requires `--unsafe`. |
+| `noirdoc ns delete <name>`     | Delete a namespace (prompts for confirmation).                                         |
 | `noirdoc models pull`        | Download spaCy models and (optionally) GLiNER weights up front.                        |
 
 Run `noirdoc <cmd> --help` for the full flag list on any subcommand.

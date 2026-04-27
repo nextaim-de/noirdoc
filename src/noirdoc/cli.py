@@ -314,8 +314,27 @@ def ns_list() -> None:
 
 @ns.command("show")
 @click.argument("namespace")
-def ns_show(namespace: str) -> None:
-    """Print the mapping summary for NAMESPACE as JSON."""
+@click.option(
+    "--unsafe",
+    is_flag=True,
+    help="Acknowledge that the full pseudonym→original mapping will be printed.",
+)
+def ns_show(namespace: str, unsafe: bool) -> None:
+    """Print the full pseudonym→original mapping as JSON.
+
+    Reveals every original value in the namespace. Refuses to run
+    without --unsafe so the mapping cannot be captured by accident
+    (terminal scrollback, CI logs, copy-paste). For a non-revealing
+    overview, use ``noirdoc ns summary``.
+    """
+    if not unsafe:
+        click.echo(
+            "ns show prints original values that defeat redaction. "
+            "Re-run with --unsafe to confirm, or use 'noirdoc ns summary' "
+            "for a counts-only view.",
+            err=True,
+        )
+        sys.exit(2)
     ns_obj = Namespace(namespace)
     if not ns_obj.exists():
         click.echo(f"Namespace {namespace!r} does not exist.", err=True)
