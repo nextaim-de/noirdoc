@@ -7,16 +7,47 @@ import structlog
 logger = structlog.get_logger()
 
 
+_METADATA_KEYS = ("Title", "Author", "Subject", "Keywords", "Creator", "Producer")
+
+
+def _extract_pdf_metadata(pdf) -> str:
+    """Return PDF Info-dict metadata as text so detectors can see embedded PII.
+
+    PDF /Info entries (Author, Title, …) routinely carry the same names and
+    addresses the body does. Without this, redacted PDFs round-trip the
+    metadata untouched and leak originals.
+    """
+    lines: list[str] = []
+    for key in _METADATA_KEYS:
+        try:
+            value = pdf.get_metadata_value(key)
+        except Exception:
+            continue
+        if value:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _prepend_metadata(pages_text: str, metadata_text: str) -> str:
+    if not metadata_text:
+        return pages_text
+    if not pages_text:
+        return metadata_text
+    return f"{metadata_text}\n\n{pages_text}"
+
+
 def extract_pdf(data: bytes, *, max_pages: int = 50) -> str:
     """Extract text from a PDF byte-string, page by page.
 
-    Returns concatenated text with double-newlines between pages.
+    Returns concatenated text with double-newlines between pages, prefixed
+    by any Info-dict metadata so detectors can scrub PII embedded there.
     """
     import pypdfium2 as pdfium
 
     pdf = pdfium.PdfDocument(data)
     pages: list[str] = []
     try:
+        metadata_text = _extract_pdf_metadata(pdf)
         for i, page in enumerate(pdf):
             if i >= max_pages:
                 break
@@ -26,7 +57,7 @@ def extract_pdf(data: bytes, *, max_pages: int = 50) -> str:
             page.close()
     finally:
         pdf.close()
-    return "\n\n".join(pages)
+    return _prepend_metadata("\n\n".join(pages), metadata_text)
 
 
 def extract_pdf_with_ocr_fallback(
@@ -51,6 +82,7 @@ def extract_pdf_with_ocr_fallback(
     pages: list[str] = []
     ocr_triggered = 0
     try:
+        metadata_text = _extract_pdf_metadata(pdf)
         for i, page in enumerate(pdf):
             if i >= max_pages:
                 break
@@ -76,4 +108,4 @@ def extract_pdf_with_ocr_fallback(
             threshold=min_chars_per_page,
         )
 
-    return "\n\n".join(pages)
+    return _prepend_metadata("\n\n".join(pages), metadata_text)
