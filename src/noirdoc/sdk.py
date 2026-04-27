@@ -22,7 +22,7 @@ from noirdoc.namespace import Namespace
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 
 if TYPE_CHECKING:
-    from noirdoc.detection.base import BaseDetector
+    from noirdoc.detection.base import BaseDetector, DetectedEntity
     from noirdoc.detection.ensemble import EnsembleDetector
 
 Policy = Literal["pseudonymize", "extract_only"]
@@ -158,15 +158,29 @@ class Redactor:
         """Detect PII in *text*, replace with pseudonyms, return the result."""
         return asyncio.run(self._redact_text_async(text, language or self._language))
 
-    async def _redact_text_async(self, text: str, language: str) -> str:
+    async def aredact_text(self, text: str, language: str | None = None) -> str:
+        """Async version of :meth:`redact_text` for callers already in an event loop."""
+        return await self._redact_text_async(text, language or self._language)
+
+    async def aredact_text_detailed(
+        self,
+        text: str,
+        language: str | None = None,
+    ) -> tuple[str, list[DetectedEntity]]:
+        """Like :meth:`aredact_text` but also returns the detected entities."""
         if not text:
-            return text
+            return text, []
         from noirdoc.pseudonymization.engine import PseudonymizationEngine
 
+        lang = language or self._language
         detector = await self._ensure_detector()
-        entities = await detector.detect(text, language)
+        entities = await detector.detect(text, lang)
         result = PseudonymizationEngine().pseudonymize(text, entities, self._mapper)
         self._persist()
+        return result, entities
+
+    async def _redact_text_async(self, text: str, language: str) -> str:
+        result, _ = await self.aredact_text_detailed(text, language)
         return result
 
     def reveal_text(self, text: str) -> str:
@@ -190,6 +204,19 @@ class Redactor:
     ) -> RedactionResult:
         """Redact a single file. Writes to *output* if given; result carries bytes either way."""
         result = asyncio.run(self._redact_file_async(Path(input_path), language or self._language))
+        if output is not None:
+            result.write(output)
+        return result
+
+    async def aredact_file(
+        self,
+        input_path: Path | str,
+        *,
+        output: Path | str | None = None,
+        language: str | None = None,
+    ) -> RedactionResult:
+        """Async version of :meth:`redact_file` for callers already in an event loop."""
+        result = await self._redact_file_async(Path(input_path), language or self._language)
         if output is not None:
             result.write(output)
         return result
@@ -284,6 +311,36 @@ class Redactor:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(revealed)
         return revealed
+
+
+def build_redactor(
+    *,
+    ensemble: EnsembleDetector | None = None,
+    namespace: str | None = None,
+    namespace_root: Path | str | None = None,
+    language: str = "de",
+    detector: DetectorChoice = "ensemble",
+    score_threshold: float = 0.5,
+    gliner_model: str = "knowledgator/gliner-pii-edge-v1.0",
+) -> Redactor:
+    """Construct a :class:`Redactor`, optionally pre-installing a built ensemble.
+
+    The CLI fallback path passes ``ensemble=None`` and lets the redactor
+    lazily build its own. The daemon passes a pre-built, cached ensemble
+    so model loading is paid once for the daemon's lifetime, not once per
+    request.
+    """
+    r = Redactor(
+        namespace=namespace,
+        namespace_root=namespace_root,
+        language=language,
+        detector=detector,
+        score_threshold=score_threshold,
+        gliner_model=gliner_model,
+    )
+    if ensemble is not None:
+        r._ensemble = ensemble
+    return r
 
 
 def redact(
