@@ -70,8 +70,25 @@ def _reconstruct_plain(block: FileBlock) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+def _replace_in_block_container(container, replacements: dict[str, str]) -> None:
+    """Apply *replacements* to every paragraph in *container* and its tables."""
+    for para in container.paragraphs:
+        _replace_in_paragraph(para, replacements)
+    for table in container.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _replace_in_paragraph(para, replacements)
+
+
 def _reconstruct_docx(block: FileBlock) -> bytes | None:
-    """Find-and-replace detected entities in DOCX paragraph runs."""
+    """Find-and-replace detected entities in DOCX paragraph runs.
+
+    Covers the document body, every section's headers and footers
+    (default, first-page, even-page variants), and review comments —
+    matching the surfaces walked by :func:`extract_docx` so PII the
+    detector saw is also stripped from the output bytes.
+    """
     from docx import Document
 
     try:
@@ -83,13 +100,20 @@ def _reconstruct_docx(block: FileBlock) -> bytes | None:
     if not replacements:
         return block.content_bytes  # nothing to replace
 
-    for para in doc.paragraphs:
-        _replace_in_paragraph(para, replacements)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    _replace_in_paragraph(para, replacements)
+    _replace_in_block_container(doc, replacements)
+
+    for section in doc.sections:
+        for header in (section.header, section.first_page_header, section.even_page_header):
+            _replace_in_block_container(header, replacements)
+        for footer in (section.footer, section.first_page_footer, section.even_page_footer):
+            _replace_in_block_container(footer, replacements)
+
+    try:
+        comments = list(doc.comments)
+    except Exception:
+        comments = []
+    for comment in comments:
+        _replace_in_block_container(comment, replacements)
 
     buf = io.BytesIO()
     doc.save(buf)
