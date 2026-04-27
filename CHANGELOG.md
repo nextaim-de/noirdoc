@@ -5,13 +5,27 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-27
+
 ### Added
+- Daemon mode: an auto-spawned `noirdoc-daemon` keeps the spaCy + GLiNER
+  models in memory across CLI invocations, eliminating the ~10s cold start
+  per `noirdoc redact` call (~40× faster on warm calls). Communicates over
+  an `AF_UNIX` socket under `~/.noirdoc/` with a Pydantic-validated
+  JSON-lines protocol. Idle-shuts-down after 10 minutes
+  (`NOIRDOC_DAEMON_IDLE_SECONDS`); version-mismatched daemons are
+  respawned automatically; any daemon failure falls back transparently
+  to in-process redaction. Opt out with `--no-daemon` or
+  `NOIRDOC_NO_DAEMON=1`. New `noirdoc daemon {status,stop,restart,logs}`
+  subcommands. ([#3])
 - `noirdoc ns summary <ns>` — counts-only namespace inspection
   (`total_entities`, per-label `by_type`). Safe to capture in wrapper
   transcripts and audit logs; original values never appear in the output.
-  Companion to `ns show`. ([#1])
+  Companion to `ns show`. ([#1], [#2])
 
 [#1]: https://github.com/nextaim-de/noirdoc/issues/1
+[#2]: https://github.com/nextaim-de/noirdoc/pull/2
+[#3]: https://github.com/nextaim-de/noirdoc/pull/3
 
 ## [0.1.0] — 2026-04-24
 
@@ -44,5 +58,6 @@ First public alpha on PyPI.
   a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
   loudly when the `[full]` extra isn't installed.
 
-[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.0
