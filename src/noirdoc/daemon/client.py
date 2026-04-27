@@ -20,6 +20,9 @@ from noirdoc.daemon import paths, spawn
 CONNECT_TIMEOUT = 2.0
 RPC_TIMEOUT = 600.0  # generous; covers cold-spawn warmup + slow file redaction
 SHUTDOWN_DRAIN_TIMEOUT = 5.0
+# Match the server-side cap (server.SOCKET_READ_LIMIT). Bounds the
+# memory the client will buffer if the daemon sends an oversize line.
+SOCKET_READ_LIMIT = 32 * 1024 * 1024
 
 
 class DaemonError(Exception):
@@ -35,7 +38,7 @@ async def _try_connect(
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
     try:
         return await asyncio.wait_for(
-            asyncio.open_unix_connection(path=str(socket_path)),
+            asyncio.open_unix_connection(path=str(socket_path), limit=SOCKET_READ_LIMIT),
             timeout=CONNECT_TIMEOUT,
         )
     except (FileNotFoundError, ConnectionRefusedError, TimeoutError, OSError):

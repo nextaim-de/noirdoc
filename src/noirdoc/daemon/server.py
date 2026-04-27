@@ -49,6 +49,12 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 1
 SUPPORTED_WARMUP_LANGUAGES = ("de", "en")
 
+# Cap per-message buffer the asyncio StreamReader will accept. A line
+# longer than this raises LimitOverrunError instead of growing memory
+# unbounded. Matches the protocol-level Field(max_length=...) caps with
+# enough headroom for JSON encoding overhead.
+SOCKET_READ_LIMIT = 32 * 1024 * 1024
+
 log = logging.getLogger("noirdoc.daemon")
 
 
@@ -368,7 +374,26 @@ async def _handle_connection(
 ) -> None:
     try:
         while not state.shutdown_event.is_set():
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except asyncio.LimitOverrunError as exc:
+                # Drain the offending line and report the error so a
+                # malicious peer can't wedge the daemon by sending an
+                # endless line.
+                log.warning("daemon.line_too_long bytes=%d", exc.consumed)
+                writer.write(
+                    _serialize(
+                        Response(
+                            id="",
+                            error=ErrorPayload(
+                                code=ERR_BAD_REQUEST,
+                                message=f"request line exceeded {SOCKET_READ_LIMIT} bytes",
+                            ),
+                        ),
+                    ),
+                )
+                await writer.drain()
+                return
             if not line:
                 return  # client closed
             response = await _dispatch(state, line)
@@ -432,6 +457,7 @@ async def _async_main() -> None:
     server = await asyncio.start_unix_server(
         lambda r, w: _handle_connection(r, w, state),
         path=str(sock_path),
+        limit=SOCKET_READ_LIMIT,
     )
     try:
         os.chmod(sock_path, 0o600)
