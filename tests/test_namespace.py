@@ -84,6 +84,28 @@ def test_mapper_to_dict_roundtrip():
     assert restored.get_or_create("Jane Doe", "PERSON") == "<<PERSON_2>>"
 
 
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "../escape",
+        "/etc/passwd",
+        "..",
+        ".",
+        "foo/bar",
+        "foo\\bar",
+        "foo bar",
+        "",
+        "a" * 65,
+        ".hidden",
+        "-leading-dash",
+    ],
+)
+def test_namespace_rejects_unsafe_names(tmp_path: Path, bad_name: str):
+    """Path-traversal / shell-metacharacter names must raise before any I/O."""
+    with pytest.raises(ValueError, match="invalid namespace name"):
+        Namespace(bad_name, root=tmp_path)
+
+
 def test_corrupt_key_raises(tmp_path: Path):
     ns = Namespace("demo", root=tmp_path)
     mapper = ns.load()
