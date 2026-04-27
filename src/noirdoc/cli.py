@@ -174,6 +174,24 @@ def ns_show(namespace: str) -> None:
     click.echo(json.dumps(mapper.get_mapping_summary(), indent=2, ensure_ascii=False))
 
 
+@ns.command("summary")
+@click.argument("namespace")
+def ns_summary(namespace: str) -> None:
+    """Print counts-only summary for NAMESPACE as JSON.
+
+    Safe alternative to ``ns show`` when stdout may be captured by a
+    wrapper, transcript, or log pipeline — original values never appear
+    in the output.
+    """
+    ns_obj = Namespace(namespace)
+    if not ns_obj.exists():
+        click.echo(f"Namespace {namespace!r} does not exist.", err=True)
+        sys.exit(1)
+    mapper = ns_obj.load()
+    summary = {"namespace": namespace, **mapper.get_counts_summary()}
+    click.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
 @ns.command("delete")
 @click.argument("namespace")
 @click.confirmation_option(prompt="Delete namespace and discard all mappings?")

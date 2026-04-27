@@ -50,6 +50,17 @@ class PseudonymMapper:
         """Pseudonym -> Original Mapping (für Debug/Audit)."""
         return dict(self._pseudo_to_entity)
 
+    def get_counts_summary(self) -> dict[str, object]:
+        """Counts-only summary: total entities and per-label breakdown.
+
+        Safe to log or emit to caller transcripts — original values never
+        enter the output.
+        """
+        return {
+            "total_entities": self.entity_count,
+            "by_type": dict(self._counters),
+        }
+
     @property
     def entity_count(self) -> int:
         return len(self._pseudo_to_entity)
