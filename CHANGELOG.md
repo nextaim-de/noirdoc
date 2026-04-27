@@ -8,8 +8,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.2] — 2026-04-27
 
 Security patch covering all High-severity findings from the 0.1.1
-internal security review. Recommended upgrade for anyone running
-0.1.x.
+internal security review, plus an Excel-redaction quality fix that
+restores parity between the CLI/SDK/daemon path and the noirdoc-cloud
+proxy. Recommended upgrade for anyone running 0.1.x.
 
 ### Security
 - **PDF metadata leak.** PII embedded in a PDF's `/Info` dictionary
@@ -58,6 +59,21 @@ internal security review. Recommended upgrade for anyone running
   pseudonym ↔ original mapping reveals every original value. The
   command now exits with an error and points at `noirdoc ns
   summary` unless `--unsafe` is passed.
+
+### Fixed
+- **XLSX redaction quality regression.** `Redactor.redact_file` (used
+  by `noirdoc redact`, the Python SDK, and the daemon) flattened every
+  cell across every sheet into a single ` | `-joined string before
+  detection, then did substring `cell.value.replace()` on
+  reconstruction. Cell context was destroyed and many entities — short
+  surnames, locations, numerically-typed cells — were silently missed.
+  XLSX inputs now route through
+  `noirdoc.file_analysis.xlsx_inference.pseudonymize_xlsx_smart`, which
+  classifies columns by header keyword, samples the first rows for
+  unclassified columns, and writes per-cell `<<TYPE_N>>` pseudonyms via
+  `mapper.get_or_create()`. The reveal path was already cell-aware and
+  round-trips correctly. This was the same path the noirdoc-cloud proxy
+  has always used; the SDK simply wasn't wired up to it.
 
 ## [0.1.1] — 2026-04-27
 
