@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import io
 
+from noirdoc.file_analysis.extractors._zip_safety import check_ooxml_zip_safe
+
 
 def extract_docx(data: bytes) -> str:
     """Extract text from a DOCX byte-string (paragraphs + table cells)."""
     from docx import Document
 
+    check_ooxml_zip_safe(data, label="docx")
     doc = Document(io.BytesIO(data))
     parts: list[str] = []
 
