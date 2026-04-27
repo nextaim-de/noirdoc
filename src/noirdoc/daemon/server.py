@@ -226,6 +226,24 @@ async def handle_shutdown(
     return ShutdownResult().model_dump()
 
 
+def _check_same_uid(path: Path, label: str) -> None:
+    """Refuse a request if *path* is not owned by the daemon's UID.
+
+    Closes the same-UID confused-deputy hole where any process able to
+    talk to the daemon socket could trick it into reading or writing
+    files the user did not intend. The daemon already runs as the user;
+    this assertion guards against symlink-swap and sloppy callers.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError as exc:
+        raise ValueError(f"{label} not found: {path}") from exc
+    if st.st_uid != os.getuid():
+        raise ValueError(
+            f"{label} {path} is not owned by the current user (uid={os.getuid()})",
+        )
+
+
 async def handle_redact(
     state: DaemonState,
     params: dict[str, Any],
@@ -234,6 +252,17 @@ async def handle_redact(
     from noirdoc.sdk import build_redactor
 
     parsed = RedactParams.model_validate(params)
+
+    if isinstance(parsed.input, RedactFileInput):
+        in_path = Path(parsed.input.path).resolve()
+        _check_same_uid(in_path, "input.path")
+        parsed.input.path = str(in_path)
+    if parsed.output_path:
+        out_path = Path(parsed.output_path).resolve()
+        out_parent = out_path.parent
+        out_parent.mkdir(parents=True, exist_ok=True)
+        _check_same_uid(out_parent, "output_path parent")
+        parsed.output_path = str(out_path)
 
     state.queue_depth += 1
     try:
@@ -352,7 +381,7 @@ async def _dispatch(state: DaemonState, raw_line: bytes) -> Response:
 
     try:
         result = await handler(state, request.params)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         return Response(
             id=request.id,
             error=ErrorPayload(code=ERR_BAD_REQUEST, message=str(exc)),
