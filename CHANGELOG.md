@@ -5,6 +5,60 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-04-27
+
+Security patch covering all High-severity findings from the 0.1.1
+internal security review. Recommended upgrade for anyone running
+0.1.x.
+
+### Security
+- **PDF metadata leak.** PII embedded in a PDF's `/Info` dictionary
+  (Author, Title, Subject, Creator, Producer, Keywords) was passed
+  through unchanged. Metadata fields are now extracted with the page
+  text so the detector ensemble pseudonymizes them before output.
+- **DOCX header / footer / comment leak.** `extract_docx` and
+  `_reconstruct_docx` only walked paragraphs and table cells — section
+  headers, footers (default + first-page + even-page), and review
+  comments survived untouched. All three surfaces are now extracted
+  on input and rewritten on output.
+- **OOXML zip-bomb defense.** DOCX and XLSX inputs are now pre-flighted
+  through a zip-envelope check that refuses archives declaring more
+  than 200 MB uncompressed or a compression ratio above 100×.
+- **XML entity expansion.** `defusedxml` is now a baseline dependency
+  so openpyxl's `iterparse` path is entity-safe by default. python-docx
+  was already pinned to a `resolve_entities=False` parser.
+- **Image decompression-bomb DoS.** OCR extraction now caps
+  `Image.MAX_IMAGE_PIXELS` at 50 megapixels and converts
+  `DecompressionBombWarning` into a hard refusal. The cap is
+  scoped per-call so it cannot leak into other PIL consumers.
+- **Detector ensemble silent failure.** A failing detector inside
+  `EnsembleDetector` no longer produces an empty result silently;
+  the failure is logged with the detector name so observability
+  catches partial-coverage regressions.
+- **Daemon protocol size limits.** `asyncio.start_unix_server` and
+  the matching client now cap line buffers at 32 MB, and the
+  protocol enforces per-field length caps (16 MB text, 4 KB paths,
+  64 chars for namespace names).
+- **Daemon path-trust check.** `handle_redact` now refuses input
+  files and output directories that are not owned by the current
+  UID. A peer cannot ask the daemon to read or overwrite another
+  user's files.
+- **Namespace name validation.** Namespace names are restricted to
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, blocking path traversal
+  (`../`, `/`, leading dot) into or out of the namespace store.
+- **Fernet key TOCTOU.** Per-namespace key creation now uses
+  `O_CREAT | O_EXCL` with `0600`, the namespace directory is
+  created with `0700`, and concurrent first-load races no longer
+  clobber an existing key.
+- **CLI output-path traversal.** `noirdoc redact -o / --output-dir`
+  is now guarded against crafted input paths that resolved outside
+  the chosen output directory, and refuses to write into the
+  namespace store.
+- **`ns show` requires `--unsafe`.** Printing a namespace's full
+  pseudonym ↔ original mapping reveals every original value. The
+  command now exits with an error and points at `noirdoc ns
+  summary` unless `--unsafe` is passed.
+
 ## [0.1.1] — 2026-04-27
 
 ### Added
@@ -58,6 +112,7 @@ First public alpha on PyPI.
   a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
   loudly when the `[full]` extra isn't installed.
 
-[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.0
