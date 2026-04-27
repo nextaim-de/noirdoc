@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import re
 
+import structlog
+
 from noirdoc.detection.base import BaseDetector, DetectedEntity
+
+log = structlog.get_logger(__name__)
 
 # Strong indicators: if ANY of these appear in a multi-word PERSON entity, reject it.
 _PERSON_STRONG_REJECT: set[str] = {
@@ -103,14 +107,11 @@ class EnsembleDetector:
             return []
 
         results = await asyncio.gather(
-            *(d.detect(text, language) for d in self.detectors),
-            return_exceptions=True,
+            *(self._run_one(d, text, language) for d in self.detectors),
         )
 
         all_entities: list[DetectedEntity] = []
         for result in results:
-            if isinstance(result, BaseException):
-                continue
             all_entities.extend(result)
 
         filtered = [
@@ -121,6 +122,30 @@ class EnsembleDetector:
         merged = self._merge_entities(filtered)
         validated = [e for e in merged if _validate_person(e)]
         return sorted(validated, key=lambda e: e.start)
+
+    @staticmethod
+    async def _run_one(
+        detector: BaseDetector,
+        text: str,
+        language: str,
+    ) -> list[DetectedEntity]:
+        """Run one detector. On failure, log and degrade to empty results.
+
+        A silent ``return_exceptions=True`` would bury detector failures
+        and cause silent leakage (e.g. PERSON detection going dark on a
+        spaCy load error). We log explicitly so operators can spot the
+        degraded state.
+        """
+        try:
+            return await detector.detect(text, language)
+        except Exception as exc:
+            log.warning(
+                "detection.detector_failed",
+                detector=getattr(detector, "name", detector.__class__.__name__),
+                language=language,
+                error=str(exc),
+            )
+            return []
 
     def _merge_entities(self, entities: list[DetectedEntity]) -> list[DetectedEntity]:
         """

@@ -166,6 +166,18 @@ async def test_failing_detector_does_not_crash():
     assert len(result) == 1
 
 
+async def test_failing_detector_logs_warning(capsys):
+    """A failing detector must log a warning so operators can detect degraded state."""
+    ent = _ent("PERSON", "Max", 0, 3, 0.9, "presidio")
+    ensemble = EnsembleDetector(
+        [FailingDetector(), FakeDetector([ent])],
+        score_threshold=0.0,
+    )
+    await ensemble.detect("dummy", "de")
+    captured = capsys.readouterr().out + capsys.readouterr().err
+    assert "detection.detector_failed" in captured
+
+
 # --- PERSON validation ---
 
 
