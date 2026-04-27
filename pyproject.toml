@@ -80,6 +80,7 @@ dev = [
 
 [project.scripts]
 noirdoc = "noirdoc.cli:main"
+noirdoc-daemon = "noirdoc.daemon.server:main"
 
 [project.urls]
 Homepage      = "https://noirdoc.de"
