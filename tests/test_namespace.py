@@ -19,9 +19,24 @@ def test_create_namespace_generates_key(tmp_path: Path):
     assert mapper.entity_count == 0
     assert ns.exists()
     assert ns.key_path.is_file()
-    # Key file should be 0600
+    # Key file must be 0600 from the moment it is created.
     mode = ns.key_path.stat().st_mode & 0o777
     assert mode == 0o600
+    # Namespace directory must be 0700 so other users cannot list it.
+    dir_mode = ns.path.stat().st_mode & 0o777
+    assert dir_mode == 0o700
+
+
+def test_existing_key_not_clobbered_on_concurrent_load(tmp_path: Path):
+    """A second `_ensure_key` must reuse the existing key, not overwrite it."""
+    ns = Namespace("demo", root=tmp_path)
+    key1 = ns._ensure_key()
+    key2 = ns._ensure_key()
+    assert key1 == key2
+    # Even after deleting the in-memory file handle and re-creating, the
+    # on-disk key remains stable.
+    ns2 = Namespace("demo", root=tmp_path)
+    assert ns2._ensure_key() == key1
 
 
 def test_save_and_load_roundtrip(tmp_path: Path):

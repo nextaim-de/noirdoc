@@ -59,10 +59,32 @@ class Namespace:
         if self.key_path.is_file():
             return self.key_path.read_bytes()
 
-        self.path.mkdir(parents=True, exist_ok=True)
+        # Create the namespace directory with 0700 *up front* so the key
+        # file is never momentarily readable by another user. mkdir's
+        # ``mode`` is honored only on creation; umask may have stripped
+        # bits, so chmod explicitly afterward.
+        self.path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(self.path, 0o700)
+        except OSError:
+            pass
+
         key = Fernet.generate_key()
-        self.key_path.write_bytes(key)
-        os.chmod(self.key_path, 0o600)
+        # Atomically create the key file with mode 0600 and refuse to
+        # clobber. O_EXCL closes the TOCTOU window where the file might
+        # have appeared after the is_file() check above.
+        try:
+            fd = os.open(
+                str(self.key_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return self.key_path.read_bytes()
+        try:
+            os.write(fd, key)
+        finally:
+            os.close(fd)
         return key
 
     def load(self) -> PseudonymMapper:
