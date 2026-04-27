@@ -136,9 +136,12 @@ async def pseudonymize_xlsx_smart(
     """
     from openpyxl import load_workbook
 
+    from noirdoc.file_analysis.extractors._zip_safety import check_ooxml_zip_safe
+
     result = XlsxResult()
 
     try:
+        check_ooxml_zip_safe(data, label="xlsx")
         wb = load_workbook(io.BytesIO(data))
     except Exception as exc:
         logger.warning("xlsx_inference.load_failed", error=str(exc))

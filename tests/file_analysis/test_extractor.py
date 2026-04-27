@@ -71,3 +71,29 @@ async def test_corrupt_data_sets_error(extractor):
     result = await extractor.extract_text(block)
     assert result is None
     assert block.extraction_error is not None
+
+
+async def test_ocr_decompression_bomb_refused(monkeypatch):
+    """A PNG that decodes to >50 MP must be refused, not OOM the process."""
+    import io
+
+    from PIL import Image
+
+    # Force the bomb threshold low so the test stays fast; the production
+    # constant is 50 MP.
+    monkeypatch.setattr(
+        "noirdoc.file_analysis.extractors.ocr._MAX_IMAGE_PIXELS",
+        100,
+    )
+    huge = Image.new("RGB", (50, 50), color="white")
+    buf = io.BytesIO()
+    huge.save(buf, format="PNG")
+    block = FileBlock(
+        content_bytes=buf.getvalue(),
+        mime_type="image/png",
+        source_path="test",
+        source_type="image",
+    )
+    result = await FileTextExtractor(ocr_enabled=True).extract_text(block)
+    assert result is None
+    assert "decompression bomb" in (block.extraction_error or "").lower()

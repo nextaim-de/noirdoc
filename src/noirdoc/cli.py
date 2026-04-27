@@ -314,8 +314,27 @@ def ns_list() -> None:
 
 @ns.command("show")
 @click.argument("namespace")
-def ns_show(namespace: str) -> None:
-    """Print the mapping summary for NAMESPACE as JSON."""
+@click.option(
+    "--unsafe",
+    is_flag=True,
+    help="Acknowledge that the full pseudonym→original mapping will be printed.",
+)
+def ns_show(namespace: str, unsafe: bool) -> None:
+    """Print the full pseudonym→original mapping as JSON.
+
+    Reveals every original value in the namespace. Refuses to run
+    without --unsafe so the mapping cannot be captured by accident
+    (terminal scrollback, CI logs, copy-paste). For a non-revealing
+    overview, use ``noirdoc ns summary``.
+    """
+    if not unsafe:
+        click.echo(
+            "ns show prints original values that defeat redaction. "
+            "Re-run with --unsafe to confirm, or use 'noirdoc ns summary' "
+            "for a counts-only view.",
+            err=True,
+        )
+        sys.exit(2)
     ns_obj = Namespace(namespace)
     if not ns_obj.exists():
         click.echo(f"Namespace {namespace!r} does not exist.", err=True)
@@ -483,6 +502,31 @@ def _expand_inputs(inputs: tuple[Path, ...]) -> list[Path]:
     return files
 
 
+def _guard_output_path(out_path: Path, *, output_dir: Path | None) -> Path:
+    """Canonicalize ``out_path`` and refuse paths that escape sane bounds.
+
+    Two checks:
+    * If ``--output-dir`` was given, the resolved output must live under
+      the resolved output dir. Drops the bullet "malicious input
+      filename routes the redacted output outside the requested dir".
+    * Refuse anything inside the user's namespaces directory: clobbering
+      a key file would silently destroy reversibility.
+    """
+    resolved = out_path.resolve()
+    if output_dir is not None:
+        resolved_dir = output_dir.resolve()
+        if not resolved.is_relative_to(resolved_dir):
+            raise click.ClickException(
+                f"refusing to write {resolved} outside --output-dir {resolved_dir}",
+            )
+    namespaces_root = DEFAULT_NAMESPACE_ROOT.resolve()
+    if resolved.is_relative_to(namespaces_root):
+        raise click.ClickException(
+            f"refusing to write inside namespace store {namespaces_root}",
+        )
+    return resolved
+
+
 def _choose_output_path(
     input_path: Path,
     *,
@@ -490,12 +534,19 @@ def _choose_output_path(
     output_dir: Path | None,
     reconstructed: bool,
 ) -> Path:
+    # Always derive the leaf name from the input *basename* so a
+    # crafted input path like "/tmp/in/../etc/passwd" cannot route the
+    # output anywhere but next to the requested location.
+    safe_name = Path(input_path.name)
     if output:
-        return output
-    parent = output_dir or input_path.parent
-    if reconstructed:
-        return parent / f"{input_path.stem}_redacted{input_path.suffix}"
-    return parent / f"{input_path.stem}_redacted.txt"
+        chosen = output
+    else:
+        parent = output_dir or input_path.parent
+        if reconstructed:
+            chosen = parent / f"{safe_name.stem}_redacted{safe_name.suffix}"
+        else:
+            chosen = parent / f"{safe_name.stem}_redacted.txt"
+    return _guard_output_path(chosen, output_dir=output_dir)
 
 
 if __name__ == "__main__":

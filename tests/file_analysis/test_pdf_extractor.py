@@ -83,6 +83,40 @@ def _make_image_pdf(text: str) -> bytes:
     return buf.getvalue()
 
 
+def _make_pdf_with_metadata(
+    body_text: str,
+    *,
+    author: str | None = None,
+    title: str | None = None,
+    subject: str | None = None,
+) -> bytes:
+    """A single-page PDF carrying /Info metadata fields.
+
+    Used to verify that PDF /Info entries are surfaced to the detector so PII
+    embedded there gets pseudonymized rather than passed through.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (1200, 1600), "white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 48)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((60, 100), body_text, fill="black", font=font)
+
+    buf = io.BytesIO()
+    save_kwargs: dict[str, str] = {}
+    if author is not None:
+        save_kwargs["author"] = author
+    if title is not None:
+        save_kwargs["title"] = title
+    if subject is not None:
+        save_kwargs["subject"] = subject
+    img.save(buf, format="PDF", resolution=150.0, **save_kwargs)
+    return buf.getvalue()
+
+
 @pytest.fixture
 def text_pdf_bytes() -> bytes:
     return _TEXT_PDF_BYTES
@@ -105,6 +139,27 @@ def test_extract_pdf_returns_text_layer(text_pdf_bytes):
 def test_extract_pdf_returns_empty_for_image_only_pdf(image_pdf_bytes):
     text = extract_pdf(image_pdf_bytes)
     assert text.strip() == ""
+
+
+def test_extract_pdf_surfaces_info_dict_metadata():
+    """PII in /Info fields must reach the extracted text so detection sees it."""
+    pdf_bytes = _make_pdf_with_metadata(
+        "body text",
+        author="Anna Mueller",
+        title="Vertrag fuer Mueller",
+        subject="Confidential",
+    )
+    text = extract_pdf(pdf_bytes)
+    assert "Author: Anna Mueller" in text
+    assert "Title: Vertrag fuer Mueller" in text
+    assert "Subject: Confidential" in text
+
+
+def test_extract_pdf_handles_missing_metadata(text_pdf_bytes):
+    """A PDF without /Info entries must not crash or inject spurious labels."""
+    text = extract_pdf(text_pdf_bytes)
+    assert "Author:" not in text
+    assert "Title:" not in text
 
 
 # ── extract_pdf_with_ocr_fallback (new) ──────────────────────────────────────

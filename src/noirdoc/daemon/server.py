@@ -49,6 +49,12 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 1
 SUPPORTED_WARMUP_LANGUAGES = ("de", "en")
 
+# Cap per-message buffer the asyncio StreamReader will accept. A line
+# longer than this raises LimitOverrunError instead of growing memory
+# unbounded. Matches the protocol-level Field(max_length=...) caps with
+# enough headroom for JSON encoding overhead.
+SOCKET_READ_LIMIT = 32 * 1024 * 1024
+
 log = logging.getLogger("noirdoc.daemon")
 
 
@@ -220,6 +226,24 @@ async def handle_shutdown(
     return ShutdownResult().model_dump()
 
 
+def _check_same_uid(path: Path, label: str) -> None:
+    """Refuse a request if *path* is not owned by the daemon's UID.
+
+    Closes the same-UID confused-deputy hole where any process able to
+    talk to the daemon socket could trick it into reading or writing
+    files the user did not intend. The daemon already runs as the user;
+    this assertion guards against symlink-swap and sloppy callers.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError as exc:
+        raise ValueError(f"{label} not found: {path}") from exc
+    if st.st_uid != os.getuid():
+        raise ValueError(
+            f"{label} {path} is not owned by the current user (uid={os.getuid()})",
+        )
+
+
 async def handle_redact(
     state: DaemonState,
     params: dict[str, Any],
@@ -228,6 +252,17 @@ async def handle_redact(
     from noirdoc.sdk import build_redactor
 
     parsed = RedactParams.model_validate(params)
+
+    if isinstance(parsed.input, RedactFileInput):
+        in_path = Path(parsed.input.path).resolve()
+        _check_same_uid(in_path, "input.path")
+        parsed.input.path = str(in_path)
+    if parsed.output_path:
+        out_path = Path(parsed.output_path).resolve()
+        out_parent = out_path.parent
+        out_parent.mkdir(parents=True, exist_ok=True)
+        _check_same_uid(out_parent, "output_path parent")
+        parsed.output_path = str(out_path)
 
     state.queue_depth += 1
     try:
@@ -346,7 +381,7 @@ async def _dispatch(state: DaemonState, raw_line: bytes) -> Response:
 
     try:
         result = await handler(state, request.params)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         return Response(
             id=request.id,
             error=ErrorPayload(code=ERR_BAD_REQUEST, message=str(exc)),
@@ -368,7 +403,26 @@ async def _handle_connection(
 ) -> None:
     try:
         while not state.shutdown_event.is_set():
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except asyncio.LimitOverrunError as exc:
+                # Drain the offending line and report the error so a
+                # malicious peer can't wedge the daemon by sending an
+                # endless line.
+                log.warning("daemon.line_too_long bytes=%d", exc.consumed)
+                writer.write(
+                    _serialize(
+                        Response(
+                            id="",
+                            error=ErrorPayload(
+                                code=ERR_BAD_REQUEST,
+                                message=f"request line exceeded {SOCKET_READ_LIMIT} bytes",
+                            ),
+                        ),
+                    ),
+                )
+                await writer.drain()
+                return
             if not line:
                 return  # client closed
             response = await _dispatch(state, line)
@@ -432,6 +486,7 @@ async def _async_main() -> None:
     server = await asyncio.start_unix_server(
         lambda r, w: _handle_connection(r, w, state),
         path=str(sock_path),
+        limit=SOCKET_READ_LIMIT,
     )
     try:
         os.chmod(sock_path, 0o600)

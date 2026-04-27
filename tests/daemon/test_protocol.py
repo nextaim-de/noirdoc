@@ -7,6 +7,8 @@ import json
 import pytest
 
 from noirdoc.daemon.protocol import (
+    MAX_PATH_LEN,
+    MAX_TEXT_VALUE_LEN,
     ErrorPayload,
     HelloParams,
     HelloResult,
@@ -108,3 +110,17 @@ def test_response_envelope_with_error():
     out = _roundtrip(resp)
     assert out.error is not None
     assert out.error.code == "bad_request"
+
+
+def test_oversized_text_value_rejected():
+    """Text inputs above MAX_TEXT_VALUE_LEN are refused to bound DoS."""
+    too_big = "a" * (MAX_TEXT_VALUE_LEN + 1)
+    with pytest.raises(Exception):
+        RedactTextInput(value=too_big)
+
+
+def test_oversized_path_rejected():
+    """Paths above MAX_PATH_LEN are refused to bound DoS."""
+    too_long = "/" + ("a" * MAX_PATH_LEN)
+    with pytest.raises(Exception):
+        RedactFileInput(path=too_long)

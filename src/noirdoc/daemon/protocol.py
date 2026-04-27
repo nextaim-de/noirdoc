@@ -20,9 +20,17 @@ from pydantic import BaseModel, Field
 
 DetectorChoice = Literal["presidio", "gliner", "ensemble"]
 
+# Per-field caps. Bound so a malicious or buggy client cannot wedge the
+# daemon with a multi-gigabyte JSON payload. Tunable here; matched by
+# the asyncio buffer limit in server.py / client.py.
+MAX_TEXT_VALUE_LEN = 16 * 1024 * 1024  # 16 MB, covers very large texts
+MAX_PATH_LEN = 4096  # POSIX PATH_MAX
+MAX_NAMESPACE_LEN = 64
+MAX_DETECTOR_MODEL_LEN = 512
+
 
 class HelloParams(BaseModel):
-    client_version: str
+    client_version: str = Field(max_length=64)
 
 
 class HelloResult(BaseModel):
@@ -33,12 +41,12 @@ class HelloResult(BaseModel):
 
 class RedactTextInput(BaseModel):
     type: Literal["text"] = "text"
-    value: str
+    value: str = Field(max_length=MAX_TEXT_VALUE_LEN)
 
 
 class RedactFileInput(BaseModel):
     type: Literal["file"] = "file"
-    path: str  # absolute path on the daemon's filesystem (same user as CLI)
+    path: str = Field(max_length=MAX_PATH_LEN)
 
 
 RedactInput = Annotated[
@@ -48,14 +56,17 @@ RedactInput = Annotated[
 
 
 class RedactParams(BaseModel):
-    namespace: str | None = None
-    namespace_root: str | None = None
-    language: str = "de"
+    namespace: str | None = Field(default=None, max_length=MAX_NAMESPACE_LEN)
+    namespace_root: str | None = Field(default=None, max_length=MAX_PATH_LEN)
+    language: str = Field(default="de", max_length=8)
     detector: DetectorChoice = "ensemble"
     score_threshold: float = 0.5
-    gliner_model: str = "knowledgator/gliner-pii-edge-v1.0"
+    gliner_model: str = Field(
+        default="knowledgator/gliner-pii-edge-v1.0",
+        max_length=MAX_DETECTOR_MODEL_LEN,
+    )
     input: RedactInput
-    output_path: str | None = None  # for file input; daemon writes here directly
+    output_path: str | None = Field(default=None, max_length=MAX_PATH_LEN)
 
 
 class RedactResult(BaseModel):
