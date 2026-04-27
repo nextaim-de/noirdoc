@@ -5,6 +5,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `noirdoc ns summary <ns>` — counts-only namespace inspection
+  (`total_entities`, per-label `by_type`). Safe to capture in wrapper
+  transcripts and audit logs; original values never appear in the output.
+  Companion to `ns show`. ([#1])
+
+[#1]: https://github.com/nextaim-de/noirdoc/issues/1
+
 ## [0.1.0] — 2026-04-24
 
 First public alpha on PyPI.

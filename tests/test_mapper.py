@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 
 
@@ -46,6 +48,20 @@ def test_mapping_summary():
         "<<PERSON_2>>": "Lisa Schmidt",
         "<<EMAIL_1>>": "max@test.de",
     }
+
+
+def test_counts_summary():
+    mapper = PseudonymMapper()
+    mapper.get_or_create("Max Müller", "PERSON")
+    mapper.get_or_create("Lisa Schmidt", "PERSON")
+    mapper.get_or_create("Max Müller", "PERSON")  # dedup, no recount
+    mapper.get_or_create("max@test.de", "EMAIL")
+    summary = mapper.get_counts_summary()
+    assert summary == {
+        "total_entities": 3,
+        "by_type": {"PERSON": 2, "EMAIL": 1},
+    }
+    assert "Max Müller" not in json.dumps(summary)
 
 
 def test_get_all_pseudonyms():
