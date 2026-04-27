@@ -38,6 +38,7 @@ def extract_ocr(data: bytes, *, lang: str = "deu+eng") -> str:
     """
     from PIL import Image
 
+    previous_max = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
     try:
         with warnings.catch_warnings():
@@ -46,5 +47,7 @@ def extract_ocr(data: bytes, *, lang: str = "deu+eng") -> str:
             img.load()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ValueError(f"image refused: decompression bomb suspected ({exc})") from exc
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous_max
 
     return ocr_image(img, lang=lang)
