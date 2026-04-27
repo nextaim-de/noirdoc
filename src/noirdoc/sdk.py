@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 Policy = Literal["pseudonymize", "extract_only"]
 DetectorChoice = Literal["presidio", "gliner", "ensemble"]
 
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 
 class RedactionResult:
     """The result of redacting a single file."""
@@ -233,6 +235,30 @@ class Redactor:
 
         if format_for_mime(mime) is None:
             raise ValueError(f"Unsupported MIME type for {path.name}: {mime}")
+
+        # XLSX uses a column-aware pipeline: header keyword classification + per-column NLP
+        # sampling + cell-level pseudonymization. The generic flat-text path destroys cell
+        # context and misses many entities — see xlsx_inference.pseudonymize_xlsx_smart.
+        if mime == _XLSX_MIME:
+            from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+
+            detector = await self._ensure_detector()
+            xr = await pseudonymize_xlsx_smart(
+                content,
+                detector,
+                self._mapper,
+                language=language,
+                pseudonymize=True,
+            )
+            self._persist()
+            return RedactionResult(
+                input_path=path,
+                output_bytes=xr.new_bytes if xr.new_bytes is not None else content,
+                entity_count=xr.entity_count,
+                entity_types=dict(xr.entity_types),
+                mime_type=mime,
+                reconstructed=True,
+            )
 
         block = FileBlock(
             source_path="sdk",
