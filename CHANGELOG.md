@@ -5,6 +5,35 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Latency work on the masking glue: both hot loops between detection and
+substitution were superlinear, and both ran on the caller's event loop.
+Entity semantics are unchanged apart from the overlap fix below.
+
+### Changed
+- **Overlap resolution is O(n log n) instead of O(n²).**
+  `EnsembleDetector._merge_entities` rescanned every already-accepted entity
+  for every candidate. Candidates are processed in start order, so the
+  accepted spans of any one type are pairwise disjoint and ordered and only
+  the most recent one can overlap the next candidate; the rescan is now a
+  per-type lookup and the sort dominates. The result is identical entity for
+  entity — the previous implementation is kept as a test oracle and the two
+  are compared on randomized inputs. Merging 1 000 entities drops from
+  ~9.9 ms to ~0.19 ms.
+- **Substitution rebuilds the text once instead of once per entity.**
+  `PseudonymizationEngine.pseudonymize` replaced entities back to front,
+  copying the whole string every time — O(entities × text length). It now
+  emits the unchanged slices and the pseudonyms into one list and joins.
+  Pseudonymizing a 200 KB text with 1 000 entities drops from ~7.1 ms to
+  ~0.41 ms. Pseudonym numbering is unchanged: pseudonyms are still minted
+  back to front, because the mapper's counters are order-sensitive and
+  callers persist the mapping.
+- **Large merges no longer block the event loop.** Above 64 entities
+  `EnsembleDetector.detect` hands overlap resolution and PERSON validation to
+  a worker thread; below that the thread hop would cost more than the work.
+  In-process async callers (the Noirdoc Cloud gateway) keep serving other
+  requests while a large document merges. `pseudonymize` stays synchronous —
+  it is linear now.
+
 ### Fixed
 - **Overlapping entities corrupted the pseudonymized output.** The detector
   ensemble deliberately keeps dual-type overlaps (a PERSON and a LOCATION span
