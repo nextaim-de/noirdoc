@@ -128,7 +128,7 @@ _RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 def test_pseudonymize_char_overlapping_entities_are_clipped():
-    """Overlapping entities: the first span wins, the overlapping tail is dropped.
+    """Overlapping entities: the first span wins, the loser's tail stays unmasked.
 
     Two overlapping entities of different types survive the merge as a
     deliberate dual-type annotation (see `_merge_entities` rule 4).
@@ -146,8 +146,17 @@ def test_pseudonymize_char_overlapping_entities_are_clipped():
     AFTER: the single-pass builder consumes [10, 20) for PERSON and skips
     LOCATION entirely, because it starts inside the consumed span. Skipped is
     skipped: `get_or_create` is not called for it, so no phantom mapping is
-    minted. The caveat is that the dual-type annotation is no longer expressed
-    in the output at all — the first entity wins the whole overlap.
+    minted.
+
+    THE CAVEAT IS NOT MERELY A LOST ANNOTATION — IT IS RESIDUAL CLEARTEXT.
+    The asserted output ends "...<<PERSON_1>>KLMNOPQRSTUVWXYZ", and the "KLMNO"
+    in it is text[20:25]: the tail of the LOCATION span the detectors flagged,
+    now emitted verbatim. The old corrupt path did not print those five
+    characters, because the LOCATION substitution had consumed [15, 25). So
+    this change trades "corrupt but fully masked" for "clean but partially
+    unmasked" on overlapping spans. Masking the remainder slice
+    text[consumed_to:entity.end] under its own mapping would give full
+    coverage and stay reversible; it is deliberately out of scope here.
     """
     entities = [
         _ent("PERSON", _RULER[10:20], 10, 20),
@@ -163,7 +172,12 @@ def test_pseudonymize_char_overlapping_entities_are_clipped():
 
 
 def test_pseudonymize_char_clip_uses_the_earlier_start_not_the_longer_span():
-    """The clip is decided by start offset alone — the first span consumes."""
+    """The clip is decided by start offset alone — the first span consumes.
+
+    No cleartext survives here: the skipped PERSON span lies entirely inside
+    the LOCATION span that won. Residual cleartext only appears when the loser
+    reaches beyond the winner's end, as in the test above.
+    """
     entities = [
         _ent("LOCATION", _RULER[10:30], 10, 30),
         _ent("PERSON", _RULER[12:15], 12, 15),

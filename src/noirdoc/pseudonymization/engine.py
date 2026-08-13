@@ -28,6 +28,18 @@ class PseudonymizationEngine:
         mapping, so no pseudonym is minted for a value that never reaches the
         output.
 
+        WARNING — clipping can leave detected PII in cleartext. The skipped
+        entity's characters beyond the winner's end are emitted verbatim: for
+        PERSON [10, 20) overlapping LOCATION [15, 25), text[20:25] — the tail
+        of the LOCATION span — appears unmasked. The previous back-to-front
+        substitution did consume those characters, at the price of splicing
+        one pseudonym into the middle of another and producing output no
+        reverse mapping could undo. Clipping trades that corruption for a
+        partial leak on overlapping spans only; non-overlapping entities are
+        unaffected. Masking the remainder slice under its own mapping instead
+        of dropping it would close the gap and is deliberately left for a
+        follow-up (see CHANGELOG).
+
         Pseudonyms are minted back-to-front, in the order the previous
         implementation used. The mapper's counters are order-sensitive and
         callers persist the mapping, so the numbering must not shift.

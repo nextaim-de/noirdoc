@@ -45,9 +45,24 @@ Entity semantics are unchanged apart from the overlap fix below.
   output. Substitution is now a single forward pass that clips overlaps: the
   span that starts first wins, and an entity starting inside the consumed span
   is skipped whole — including its mapping, so no phantom pseudonyms are
-  created. **Caveat:** the losing half of a dual-type overlap is no longer
-  represented in the output at all. Non-overlapping entities are unaffected,
-  byte for byte and including the pseudonym numbering.
+  created. Non-overlapping entities are unaffected, byte for byte and
+  including the pseudonym numbering.
+
+  **Caveat — read this before upgrading.** This trades corruption for a
+  partial leak. Skipping the overlapping entity means the characters of the
+  losing span that reach beyond the winner's end are now emitted **in
+  cleartext**: with PERSON `[10, 20)` overlapping LOCATION `[15, 25)`, the
+  five characters at `[20, 25)` — the tail of a span the detectors flagged as
+  a LOCATION — appear verbatim in the output. Under the old back-to-front
+  splice those characters were absent, because the (corrupt) LOCATION
+  substitution had consumed them. So a dual-type overlap that previously
+  produced unusable-but-fully-masked garbage can now leak part of the
+  detected entity. A strictly better variant is possible and was deliberately
+  **not** implemented here, because it goes beyond the reviewed scope of this
+  change: keep the skip for the mapping decision, but pseudonymize the
+  remainder slice `text[consumed_to:entity.end]` under its own mapping —
+  full coverage, still reversible, still one pass. Say the word and it will
+  be added.
 
 ## [0.1.2] — 2026-04-27
 
