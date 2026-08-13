@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
 from noirdoc.detection.base import BaseDetector, DetectedEntity
-from noirdoc.detection.ensemble import EnsembleDetector
+from noirdoc.detection.ensemble import _MERGE_THREAD_THRESHOLD, EnsembleDetector
 
 # --- Helpers ---
 
@@ -411,3 +415,64 @@ def test_merge_char_zero_length_entity_never_overlaps():
     later = _ent("PERSON", "Mü", 6, 12, 0.50, "flair")
     # `later` is resolved against `span` (index 0), not against `empty`.
     assert _merge([span, empty, later]) == [span, empty]
+
+
+# --- Merge off the event loop ---
+
+
+def _spy_to_thread(calls: list[str]) -> Callable[..., Any]:
+    """Wrap asyncio.to_thread, recording the name of every offloaded callable."""
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        calls.append(getattr(func, "__name__", repr(func)))
+        return await real_to_thread(func, *args, **kwargs)
+
+    return spy
+
+
+def _entity_batch(count: int) -> list[DetectedEntity]:
+    """`count` well-separated EMAIL entities, none of which merge."""
+    return [_ent("EMAIL", f"a{i}@b.de", i * 10, i * 10 + 8, 0.9, "presidio") for i in range(count)]
+
+
+async def test_merge_stays_on_the_loop_at_the_threshold(monkeypatch):
+    """At the threshold the thread hop would cost more than the merge."""
+    calls: list[str] = []
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread(calls))
+    ensemble = EnsembleDetector(
+        [FakeDetector(_entity_batch(_MERGE_THREAD_THRESHOLD))],
+        score_threshold=0.0,
+    )
+    result = await ensemble.detect("dummy", "de")
+    assert len(result) == _MERGE_THREAD_THRESHOLD
+    assert calls == []
+
+
+async def test_merge_moves_off_the_loop_above_the_threshold(monkeypatch):
+    """Above the threshold the merge must not block the caller's event loop."""
+    calls: list[str] = []
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread(calls))
+    ensemble = EnsembleDetector(
+        [FakeDetector(_entity_batch(_MERGE_THREAD_THRESHOLD + 1))],
+        score_threshold=0.0,
+    )
+    result = await ensemble.detect("dummy", "de")
+    assert len(result) == _MERGE_THREAD_THRESHOLD + 1
+    assert calls == ["_merge_and_validate"]
+
+
+async def test_off_loop_path_produces_the_same_result_as_the_inline_path():
+    """Both sides of the threshold run the same merge and the same filtering."""
+    entities = _entity_batch(_MERGE_THREAD_THRESHOLD + 1)
+    # A duplicate span that must be merged away and a PERSON that must be rejected.
+    entities.append(_ent("EMAIL", "a0@b.de", 0, 8, 0.95, "gliner"))
+    entities.append(_ent("PERSON", "Hoffmann, und", 5000, 5013, 0.9, "presidio"))
+    entities.append(_ent("PERSON", "Lena", 6000, 6004, 0.9, "presidio"))
+
+    big = await EnsembleDetector([FakeDetector(entities)], score_threshold=0.0).detect("x", "de")
+    small = EnsembleDetector([])._merge_and_validate(entities)
+
+    assert big == sorted(small, key=lambda e: e.start)
+    assert len(big) == _MERGE_THREAD_THRESHOLD + 2
+    assert [e.start for e in big] == sorted(e.start for e in big)

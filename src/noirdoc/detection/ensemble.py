@@ -90,6 +90,11 @@ _TYPE_THRESHOLDS: dict[str, float] = {
     "DATE": 0.7,
 }
 
+# Above this many entities the merge is handed to a worker thread so it cannot
+# stall the caller's event loop — the library is used in-process by an async
+# gateway. Below it the thread hop costs more than the merge itself.
+_MERGE_THREAD_THRESHOLD = 64
+
 
 class EnsembleDetector:
     """Kombiniert mehrere Detektoren und löst Überlappungen auf."""
@@ -119,9 +124,19 @@ class EnsembleDetector:
             for e in all_entities
             if e.score >= _TYPE_THRESHOLDS.get(e.entity_type, self.score_threshold)
         ]
-        merged = self._merge_entities(filtered)
-        validated = [e for e in merged if _validate_person(e)]
+        if len(filtered) > _MERGE_THREAD_THRESHOLD:
+            validated = await asyncio.to_thread(self._merge_and_validate, filtered)
+        else:
+            validated = self._merge_and_validate(filtered)
         return sorted(validated, key=lambda e: e.start)
+
+    def _merge_and_validate(self, entities: list[DetectedEntity]) -> list[DetectedEntity]:
+        """Resolve overlaps, then drop PERSON false positives.
+
+        The two steps are one unit so the whole CPU-bound tail of `detect` can
+        move to a worker thread in a single hop.
+        """
+        return [e for e in self._merge_entities(entities) if _validate_person(e)]
 
     @staticmethod
     async def _run_one(
