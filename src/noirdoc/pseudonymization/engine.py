@@ -14,11 +14,41 @@ class PseudonymizationEngine:
         mapper: PseudonymMapper,
     ) -> str:
         """
-        Entities von hinten nach vorne ersetzen, damit Offsets stimmen.
+        Text einmal von vorne nach hinten neu aufbauen.
+
+        One pass over the entities in start order, emitting
+        ``text[cursor:start] + pseudonym`` and joining at the end: O(n) in the
+        text length instead of one full string copy per entity.
+
+        Overlapping entities are clipped. The ensemble deliberately keeps
+        dual-type overlaps (`_merge_entities` rule 4), and they cannot both be
+        substituted — the second substitution would land inside the first
+        pseudonym and corrupt it. The span that starts first wins; an entity
+        starting inside the consumed span is skipped whole, including its
+        mapping, so no pseudonym is minted for a value that never reaches the
+        output.
+
+        Pseudonyms are minted back-to-front, in the order the previous
+        implementation used. The mapper's counters are order-sensitive and
+        callers persist the mapping, so the numbering must not shift.
         """
-        sorted_entities = sorted(entities, key=lambda e: e.start, reverse=True)
-        result = text
-        for entity in sorted_entities:
-            pseudonym = mapper.get_or_create(entity.text, entity.entity_type)
-            result = result[: entity.start] + pseudonym + result[entity.end :]
-        return result
+        kept: list[DetectedEntity] = []
+        consumed_to = 0
+        for entity in sorted(entities, key=lambda e: e.start):
+            if entity.start < consumed_to:
+                continue
+            kept.append(entity)
+            consumed_to = entity.end
+
+        pseudonyms: list[str] = [""] * len(kept)
+        for i in sorted(range(len(kept)), key=lambda i: kept[i].start, reverse=True):
+            pseudonyms[i] = mapper.get_or_create(kept[i].text, kept[i].entity_type)
+
+        parts: list[str] = []
+        cursor = 0
+        for entity, pseudonym in zip(kept, pseudonyms, strict=True):
+            parts.append(text[cursor : entity.start])
+            parts.append(pseudonym)
+            cursor = entity.end
+        parts.append(text[cursor:])
+        return "".join(parts)

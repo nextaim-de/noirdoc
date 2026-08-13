@@ -5,6 +5,21 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Overlapping entities corrupted the pseudonymized output.** The detector
+  ensemble deliberately keeps dual-type overlaps (a PERSON and a LOCATION span
+  covering the same characters, `_merge_entities` rule 4). Substitution ran
+  back to front, so the second replacement spliced its pseudonym into the
+  already-substituted text at offsets that no longer meant what the caller
+  meant. The output ended up with a half-eaten placeholder that no reverse
+  mapping can undo, plus a pseudonym minted for a value that never reached the
+  output. Substitution is now a single forward pass that clips overlaps: the
+  span that starts first wins, and an entity starting inside the consumed span
+  is skipped whole — including its mapping, so no phantom pseudonyms are
+  created. **Caveat:** the losing half of a dual-type overlap is no longer
+  represented in the output at all. Non-overlapping entities are unaffected,
+  byte for byte and including the pseudonym numbering.
+
 ## [0.1.2] — 2026-04-27
 
 Security patch covering all High-severity findings from the 0.1.1

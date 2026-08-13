@@ -127,16 +127,27 @@ def test_pseudonymize_char_input_order_does_not_matter():
 _RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
-def test_pseudonymize_char_overlapping_entities_corrupt_the_output():
-    """DOCUMENTS A BUG — this is current behavior, not desired behavior.
+def test_pseudonymize_char_overlapping_entities_are_clipped():
+    """Overlapping entities: the first span wins, the overlapping tail is dropped.
 
     Two overlapping entities of different types survive the merge as a
-    deliberate dual-type annotation (see `_merge_entities` rule 4). The
-    back-to-front replacement then substitutes LOCATION[15, 25) first and
-    splices PERSON[10, 20) into the ALREADY SUBSTITUTED text, so offset 20 no
-    longer points where the caller meant. The result is a half-eaten
-    placeholder (`ATION_1>>`) that no reverse mapping can undo, plus a phantom
-    LOCATION mapping whose original value is no longer present in the output.
+    deliberate dual-type annotation (see `_merge_entities` rule 4).
+
+    BEFORE 0.1.3 this returned spliced garbage — the back-to-front replacement
+    substituted LOCATION[15, 25) first and then spliced PERSON[10, 20) into the
+    ALREADY SUBSTITUTED text, so offset 20 no longer pointed where the caller
+    meant:
+
+        "0123456789<<PERSON_1>>ATION_1>>PQRSTUVWXYZ"
+
+    — a half-eaten placeholder that no reverse mapping can undo, plus a phantom
+    LOCATION mapping whose original value is not present in the output.
+
+    AFTER: the single-pass builder consumes [10, 20) for PERSON and skips
+    LOCATION entirely, because it starts inside the consumed span. Skipped is
+    skipped: `get_or_create` is not called for it, so no phantom mapping is
+    minted. The caveat is that the dual-type annotation is no longer expressed
+    in the output at all — the first entity wins the whole overlap.
     """
     entities = [
         _ent("PERSON", _RULER[10:20], 10, 20),
@@ -145,8 +156,33 @@ def test_pseudonymize_char_overlapping_entities_corrupt_the_output():
     mapper = RecordingMapper()
     result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
 
-    assert result == "0123456789<<PERSON_1>>ATION_1>>PQRSTUVWXYZ"
-    assert mapper.calls == [("FGHIJKLMNO", "LOCATION"), ("ABCDEFGHIJ", "PERSON")]
-    # The phantom mapping: LOCATION_1 was minted but does not appear in the output.
-    assert "<<LOCATION_1>>" not in result
-    assert mapper.entity_count == 2
+    assert result == "0123456789<<PERSON_1>>KLMNOPQRSTUVWXYZ"
+    assert mapper.calls == [("ABCDEFGHIJ", "PERSON")]
+    assert mapper.entity_count == 1
+    assert mapper.reverse_lookup("<<PERSON_1>>") == "ABCDEFGHIJ"
+
+
+def test_pseudonymize_char_clip_uses_the_earlier_start_not_the_longer_span():
+    """The clip is decided by start offset alone — the first span consumes."""
+    entities = [
+        _ent("LOCATION", _RULER[10:30], 10, 30),
+        _ent("PERSON", _RULER[12:15], 12, 15),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert result == "0123456789<<LOCATION_1>>UVWXYZ"
+    assert mapper.calls == [("ABCDEFGHIJKLMNOPQRST", "LOCATION")]
+
+
+def test_pseudonymize_char_adjacent_entities_are_not_clipped():
+    """Touching but non-overlapping spans (end == next start) both survive."""
+    entities = [
+        _ent("PERSON", _RULER[10:15], 10, 15),
+        _ent("LOCATION", _RULER[15:20], 15, 20),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert result == "0123456789<<PERSON_1>><<LOCATION_1>>KLMNOPQRSTUVWXYZ"
+    assert mapper.calls == [("FGHIJ", "LOCATION"), ("ABCDE", "PERSON")]
