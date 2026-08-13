@@ -81,3 +81,72 @@ def test_offsets_preserved_with_replacement():
     assert "<<PERSON_1>>" in result
     assert "<<PERSON_2>>" in result
     assert "CD" in result
+
+
+# --- Characterization of pseudonymize ---
+
+
+class RecordingMapper(PseudonymMapper):
+    """PseudonymMapper that records every get_or_create call in order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[str, str]] = []
+
+    def get_or_create(self, entity_text: str, entity_type: str) -> str:
+        self.calls.append((entity_text, entity_type))
+        return super().get_or_create(entity_text, entity_type)
+
+
+def test_pseudonymize_char_mapping_assigned_back_to_front():
+    """Pseudonyms are assigned in DESCENDING start order.
+
+    The counters are order-sensitive, so the last entity in the text gets
+    `_1`. This is part of the public call pattern: the gateway persists
+    mappings, so the numbering must not change.
+    """
+    text = "Anna und Bert"
+    entities = [_ent("PERSON", "Anna", 0, 4), _ent("PERSON", "Bert", 9, 13)]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(text, entities, mapper)
+    assert mapper.calls == [("Bert", "PERSON"), ("Anna", "PERSON")]
+    assert result == "<<PERSON_2>> und <<PERSON_1>>"
+
+
+def test_pseudonymize_char_input_order_does_not_matter():
+    """Entities are sorted internally, so the caller's list order is irrelevant."""
+    text = "Anna und Bert"
+    anna = _ent("PERSON", "Anna", 0, 4)
+    bert = _ent("PERSON", "Bert", 9, 13)
+    forward = PseudonymizationEngine().pseudonymize(text, [anna, bert], RecordingMapper())
+    reverse = PseudonymizationEngine().pseudonymize(text, [bert, anna], RecordingMapper())
+    assert forward == reverse == "<<PERSON_2>> und <<PERSON_1>>"
+
+
+# A fixed ruler string: index 10 is "A", index 15 is "F", index 25 is "P".
+_RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def test_pseudonymize_char_overlapping_entities_corrupt_the_output():
+    """DOCUMENTS A BUG — this is current behavior, not desired behavior.
+
+    Two overlapping entities of different types survive the merge as a
+    deliberate dual-type annotation (see `_merge_entities` rule 4). The
+    back-to-front replacement then substitutes LOCATION[15, 25) first and
+    splices PERSON[10, 20) into the ALREADY SUBSTITUTED text, so offset 20 no
+    longer points where the caller meant. The result is a half-eaten
+    placeholder (`ATION_1>>`) that no reverse mapping can undo, plus a phantom
+    LOCATION mapping whose original value is no longer present in the output.
+    """
+    entities = [
+        _ent("PERSON", _RULER[10:20], 10, 20),
+        _ent("LOCATION", _RULER[15:25], 15, 25),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert result == "0123456789<<PERSON_1>>ATION_1>>PQRSTUVWXYZ"
+    assert mapper.calls == [("FGHIJKLMNO", "LOCATION"), ("ABCDEFGHIJ", "PERSON")]
+    # The phantom mapping: LOCATION_1 was minted but does not appear in the output.
+    assert "<<LOCATION_1>>" not in result
+    assert mapper.entity_count == 2

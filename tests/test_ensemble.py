@@ -312,3 +312,102 @@ async def test_flair_and_presidio_same_span_same_type_picks_winner():
     assert len(result) == 1
     assert result[0].source == "flair"
     assert result[0].score == 0.92
+
+
+# --- Characterization of _merge_entities ---
+#
+# These tests pin the merge's observable behavior so the O(n log n) rewrite
+# cannot change it. They call _merge_entities directly (not detect()), because
+# detect() re-sorts the merged list by start and would hide the raw output order.
+
+
+def _merge(entities: list[DetectedEntity]) -> list[DetectedEntity]:
+    return EnsembleDetector([])._merge_entities(entities)
+
+
+def test_merge_char_empty_input():
+    """No entities in, no entities out."""
+    assert _merge([]) == []
+
+
+def test_merge_char_dual_type_overlap_keeps_both_in_processing_order():
+    """Rule 4: overlapping entities of DIFFERENT types are both kept.
+
+    Equal start and equal length means the sort is a no-op (stable), so the
+    output order is the input order.
+    """
+    person = _ent("PERSON", "Hoffmann", 0, 8, 0.85, "presidio")
+    org = _ent("ORGANIZATION", "Hoffmann", 0, 8, 0.80, "gliner")
+    assert _merge([person, org]) == [person, org]
+    assert _merge([org, person]) == [org, person]
+
+
+def test_merge_char_longer_span_processed_first_on_equal_start():
+    """Rule 1: sort key is (start, -length) — the longer span is processed first.
+
+    The shorter span therefore arrives as the candidate and loses the score
+    comparison, so the accepted slot keeps the longer span.
+    """
+    long_span = _ent("PERSON", "Max Müller", 0, 10, 0.85, "gliner")
+    short_span = _ent("PERSON", "Max", 0, 3, 0.85, "gliner")
+    assert _merge([short_span, long_span]) == [long_span]
+
+
+def test_merge_char_same_type_overlap_replaces_in_place():
+    """Rule 3: the winner replaces the accepted entry at its original index."""
+    weak = _ent("PERSON", "Max", 0, 10, 0.50, "presidio")
+    strong = _ent("PERSON", "Max Müller", 5, 20, 0.90, "gliner")
+    other_type = _ent("LOCATION", "Berlin", 2, 5, 0.70, "presidio")
+    # LOCATION is accepted at index 1 and stays there; the PERSON slot (index 0)
+    # is overwritten by the winner.
+    assert _merge([weak, other_type, strong]) == [strong, other_type]
+
+
+def test_merge_char_output_is_not_sorted_by_start():
+    """In-place replacement can leave the returned list out of start order.
+
+    `detect()` sorts afterwards; `_merge_entities` itself does not.
+    """
+    weak = _ent("PERSON", "Max", 0, 10, 0.50, "presidio")
+    other_type = _ent("LOCATION", "Berlin", 2, 5, 0.70, "presidio")
+    strong = _ent("PERSON", "Müller", 3, 12, 0.90, "gliner")
+    merged = _merge([weak, other_type, strong])
+    assert [e.start for e in merged] == [3, 2]
+
+
+def test_merge_char_chain_resolves_against_the_current_winner():
+    """A chain of same-type overlaps collapses against whatever currently sits
+    in the accepted slot — not against the original entry and not against the
+    union of all losers."""
+    first = _ent("PERSON", "a", 0, 10, 0.50, "presidio")
+    winner = _ent("PERSON", "b", 5, 12, 0.90, "gliner")
+    third = _ent("PERSON", "c", 11, 20, 0.60, "flair")
+    # `third` does not overlap `first` (11 >= 10) but does overlap `winner`,
+    # which by then occupies the slot — so it is compared and loses.
+    assert _merge([first, winner, third]) == [winner]
+
+
+def test_merge_char_loser_span_does_not_shield_later_entities():
+    """Overlap is checked against the accepted winner only.
+
+    The rejected candidate's span is forgotten entirely, so a later entity that
+    would have overlapped the loser is accepted as a separate entity.
+    """
+    winner = _ent("PERSON", "a", 0, 10, 0.90, "presidio")
+    loser = _ent("PERSON", "b", 5, 20, 0.50, "gliner")
+    later = _ent("PERSON", "c", 15, 25, 0.70, "flair")
+    # `later` overlaps the loser's [5, 20) span but not the winner's [0, 10).
+    assert _merge([winner, loser, later]) == [winner, later]
+
+
+def test_merge_char_zero_length_entity_never_overlaps():
+    """A zero-length span satisfies neither half of the overlap test.
+
+    It is always accepted, is never replaced, and — because it never overlaps —
+    it does not shadow the preceding same-type entity for later candidates.
+    """
+    span = _ent("PERSON", "Max", 5, 10, 0.90, "presidio")
+    empty = _ent("PERSON", "", 5, 5, 0.80, "gliner")
+    later = _ent("PERSON", "Mü", 6, 12, 0.50, "flair")
+    # `later` is resolved against `span` (index 0), not against `empty`.
+    assert _merge([span, empty, later]) == [span, empty]
