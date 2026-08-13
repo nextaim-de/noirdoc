@@ -151,10 +151,25 @@ class EnsembleDetector:
         """
         Overlap Resolution:
         1. Sort by start, then by span length descending (longer first)
-        2. For each entity, check overlap with already accepted entities
+        2. For each entity, check overlap with the open slot of its own type
         3. On overlap with SAME type: higher score wins; tie → longer span; tie → presidio wins
         4. On overlap with DIFFERENT type: keep both (dual-type annotation)
         5. No overlap: accept entity
+
+        Sort + sweep, O(n log n). Candidates arrive in start order, which means
+        the accepted spans of any one type are pairwise disjoint and ordered:
+        once a second span of a type is accepted, the earlier ones end at or
+        before its start and can never overlap a later candidate again. So only
+        the most recently accepted span per type — its "open slot" — has to be
+        checked, instead of rescanning the whole accepted list (O(n²)).
+
+        Zero-length spans satisfy neither half of the overlap test. They can
+        never be replaced and never shadow the preceding span of their type, so
+        they are accepted without becoming the open slot.
+
+        The result is identical to the pre-0.1.3 nested-loop implementation,
+        entity for entity and in the same order; the two are pinned to each
+        other on randomized inputs by ``tests/test_merge_equivalence.py``.
         """
         sorted_ents = sorted(
             entities,
@@ -162,23 +177,19 @@ class EnsembleDetector:
         )
 
         accepted: list[DetectedEntity] = []
+        # entity_type -> index in `accepted` of that type's last non-empty span
+        open_slot: dict[str, int] = {}
         for candidate in sorted_ents:
-            same_type_idx = None
-            for i, existing in enumerate(accepted):
-                if (
-                    candidate.start < existing.end
-                    and existing.start < candidate.end
-                    and candidate.entity_type == existing.entity_type
-                ):
-                    same_type_idx = i
-                    break
+            slot = open_slot.get(candidate.entity_type)
+            if slot is not None:
+                existing = accepted[slot]
+                if candidate.start < existing.end and existing.start < candidate.end:
+                    accepted[slot] = self._pick_winner(existing, candidate)
+                    continue
 
-            if same_type_idx is None:
-                accepted.append(candidate)
-            else:
-                existing = accepted[same_type_idx]
-                winner = self._pick_winner(existing, candidate)
-                accepted[same_type_idx] = winner
+            accepted.append(candidate)
+            if candidate.end > candidate.start:
+                open_slot[candidate.entity_type] = len(accepted) - 1
 
         return accepted
 
