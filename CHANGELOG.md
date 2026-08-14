@@ -42,26 +42,24 @@ Entity semantics are unchanged apart from the overlap fix below.
   already-substituted text at offsets that no longer meant what the caller
   meant. The output ended up with a half-eaten placeholder that no reverse
   mapping can undo, plus a pseudonym minted for a value that never reached the
-  output. Substitution is now a single forward pass that clips overlaps: the
-  span that starts first wins, and an entity starting inside the consumed span
-  is skipped whole — including its mapping, so no phantom pseudonyms are
-  created. Non-overlapping entities are unaffected, byte for byte and
-  including the pseudonym numbering.
+  output. Substitution is now a single forward pass that masks overlaps in
+  pieces: the span that starts first wins and is replaced whole, and an entity
+  reaching beyond it contributes its remainder — the slice
+  `text[consumed_to:entity.end]` — which is replaced by its own pseudonym
+  under its own entity type. An entity that lies entirely inside the consumed
+  span has no remainder and is skipped whole, including its mapping, so no
+  phantom pseudonyms are created. Non-overlapping entities are unaffected,
+  byte for byte and including the pseudonym numbering.
 
-  **Caveat — read this before upgrading.** This trades corruption for a
-  partial leak. Skipping the overlapping entity means the characters of the
-  losing span that reach beyond the winner's end are now emitted **in
-  cleartext**: with PERSON `[10, 20)` overlapping LOCATION `[15, 25)`, the
-  five characters at `[20, 25)` — the tail of a span the detectors flagged as
-  a LOCATION — appear verbatim in the output. Under the old back-to-front
-  splice those characters were absent, because the (corrupt) LOCATION
-  substitution had consumed them. So a dual-type overlap that previously
-  produced unusable-but-fully-masked garbage can now leak part of the
-  detected entity. A strictly better variant is possible and was deliberately
-  **not** implemented here, because it goes beyond the reviewed scope of this
-  change: keep the skip for the mapping decision, but pseudonymize the
-  remainder slice `text[consumed_to:entity.end]` under its own mapping —
-  full coverage, still reversible, still one pass.
+  **Overlaps are fully masked and fully reversible.** Every character covered
+  by a detected span is replaced, whatever the overlap shape, and every
+  pseudonym maps back to exactly the text it replaced — a remainder's mapping
+  holds the slice, not the span it came from — so reidentification restores
+  the input character for character. With PERSON `[10, 20)` overlapping
+  LOCATION `[15, 25)`, the output carries the PERSON pseudonym for
+  `[10, 20)` and a LOCATION pseudonym whose original value is `text[20:25]`.
+  This supersedes the interim behaviour on this release branch, which skipped
+  the losing entity whole and left those five characters in cleartext.
 
 ## [0.1.2] — 2026-04-27
 
