@@ -27,13 +27,16 @@ class FileBlock:
     extracted_text: str | None = None
     entities: list[DetectedEntity] = field(default_factory=list)
     pseudonymized_text: str | None = None
+    reconstructed_bytes: bytes | None = None
+    extraction_error: str | None = None
+    # New fields go at the END: callers may construct this positionally, so
+    # inserting one mid-class silently rebinds their arguments.
+    #
     # What the pseudonymizer actually emitted: original -> placeholder, in
     # output order. Reconstruction needs it to rewrite DOCX runs and XLSX
     # cells; None means "not pseudonymized here", and reconstruction refuses
     # rather than guessing the pairing from entity offsets.
     emitted_spans: list[EmittedSpan] | None = None
-    reconstructed_bytes: bytes | None = None
-    extraction_error: str | None = None
 
 
 @dataclass
