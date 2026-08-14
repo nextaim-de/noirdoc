@@ -67,3 +67,6 @@ src/noirdoc/_version.py
 
 # Claude Code working notes (brainstorm plans + specs)
 docs/superpowers/
+
+# Review/process artifacts (kept out of this public repo)
+.superpowers/
