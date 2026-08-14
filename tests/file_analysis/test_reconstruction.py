@@ -197,12 +197,33 @@ def test_replacements_refused_when_an_original_hides_in_a_placeholder():
 
     with capture_logs() as logs:
         assert _build_replacements(block) is None
-    assert [entry["event"] for entry in logs] == [
-        "reconstruction.replacement_collides_with_placeholder"
-    ]
+    assert [entry["event"] for entry in logs] == ["reconstruction.replacement_selfcheck_failed"]
 
     assert _reconstruct_docx(block) is None
     assert _reconstruct_xlsx(block) is None
+
+
+def test_replacements_allow_an_original_inside_its_own_placeholder():
+    """An original that occurs in its OWN placeholder is benign — do not refuse it.
+
+    An ID "1" mints `<<ID_1>>`, which contains "1". Replacement still lands
+    correctly: `str.replace` makes one left-to-right pass and never rescans
+    what it inserted. Refusing this shape would drop the formatting of an
+    ordinary document for nothing.
+    """
+    text = "Der Vorgang 1 wurde geprueft."
+    entities = [_ent("ID", "1", text.index("1"), text.index("1") + 1)]
+
+    mapper = PseudonymMapper()
+    block = _block(_DOCX_MIME, _docx_bytes(text), text, entities)
+    pseudonymize_block(block, mapper)
+    assert block.pseudonymized_text == "Der Vorgang <<ID_1>> wurde geprueft."
+
+    with capture_logs() as logs:
+        replacements = _build_replacements(block)
+    assert replacements == {"1": "<<ID_1>>"}
+    assert logs == []
+    assert _docx_text(_reconstruct_docx(block) or b"") == block.pseudonymized_text
 
 
 def test_replacements_pass_the_self_check_on_a_normal_document():

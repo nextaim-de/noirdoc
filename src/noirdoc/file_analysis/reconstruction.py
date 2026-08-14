@@ -285,24 +285,18 @@ def _replacements_reproduce_the_masked_text(
     also occurs inside an already-inserted placeholder is rewritten there too.
     An ID "12" alongside twelve people turns ``<<PERSON_12>>`` into
     ``<<PERSON_<<ID_1>>>>``: still masked, but no reverse mapping can undo it.
-    The direct signature of that hazard is an original that is a substring of
-    some placeholder, which is checked first because it names the problem;
-    applying the map to the extracted text and comparing with the masked text
-    then catches whatever else could make the two disagree.
+    The same by-text reach can also hit an occurrence the detector never
+    flagged. Applying the map and comparing with the masked text catches both,
+    and everything else that could make the two disagree.
+
+    An original inside its OWN placeholder is not a hazard and must not be
+    refused: ``str.replace`` makes one left-to-right pass and never rescans
+    what it inserted, and a shorter original's placeholder does not exist in
+    the text yet while the longer originals are being applied.
 
     Nothing about the offending values is logged — they are the PII this
     module exists to remove.
     """
-    for original in replacements:
-        if any(original in pseudonym for pseudonym in replacements.values()):
-            logger.warning(
-                "reconstruction.replacement_collides_with_placeholder",
-                path=block.source_path,
-                mime=block.mime_type,
-                replacement_count=len(replacements),
-            )
-            return False
-
     rebuilt = block.extracted_text or ""
     for original, pseudonym in replacements.items():
         rebuilt = rebuilt.replace(original, pseudonym)
