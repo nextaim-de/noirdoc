@@ -27,15 +27,29 @@ Entity semantics are unchanged apart from the overlap fix below.
   per-type lookup and the sort dominates. The result is identical entity for
   entity — the previous implementation is kept as a test oracle and the two
   are compared on randomized inputs. Merging 1 000 entities drops from
-  ~9.9 ms to ~0.19 ms.
+  ~9.7 ms to ~0.18 ms.
 - **Substitution rebuilds the text once instead of once per entity.**
   `PseudonymizationEngine.pseudonymize` replaced entities back to front,
   copying the whole string every time — O(entities × text length). It now
   emits the unchanged slices and the pseudonyms into one list and joins.
-  Pseudonymizing a 200 KB text with 1 000 entities drops from ~7.1 ms to
-  ~0.41 ms. Pseudonym numbering is unchanged: pseudonyms are still minted
-  back to front, because the mapper's counters are order-sensitive and
-  callers persist the mapping.
+  Pseudonym numbering is unchanged: pseudonyms are still minted back to
+  front, because the mapper's counters are order-sensitive and callers
+  persist the mapping. Measured with `benchmark/bench_hot_loops.py`
+  (best of five, against the 0.1.2 implementation):
+
+  | entities | text | 0.1.2 | now |
+  | ---: | ---: | ---: | ---: |
+  | 10 | 128 B | 0.0039 ms | 0.0086 ms |
+  | 100 | 1.2 KB | 0.049 ms | 0.079 ms |
+  | 1 000 | 12 KB | 0.86 ms | 0.80 ms |
+  | 1 000 | 200 KB | 7.1 ms | 0.82 ms |
+
+  The win is the long-text row — 8.7× where it used to hurt. On short texts
+  with few entities the new path is slower, about 2× at ten entities, because
+  it does per-entity bookkeeping (overlap resolution and the emitted-span
+  record) that the old string-splice did not; break-even is around a thousand
+  entities. In absolute terms that regression is single-digit microseconds
+  per call, well below the noise of a request that also runs detection.
 - **Large merges no longer block the event loop.** Above 64 entities
   `EnsembleDetector.detect` hands overlap resolution and PERSON validation to
   a worker thread; below that the thread hop would cost more than the work.
@@ -66,14 +80,18 @@ Entity semantics are unchanged apart from the overlap fix below.
   A remainder that is only whitespace mints nothing.
 
   **Overlaps are fully masked and reversible.** Every character covered by a
-  detected span is replaced, whatever the overlap shape, and every pseudonym
-  maps back to exactly the text it replaced — a remainder's mapping holds the
-  trimmed slice, not the span it came from — so reidentification restores the
-  input character for character, up to one designed mapper property that
-  predates this change and applies to every entity: `get_or_create` keys on
-  `strip().lower()`, so values differing only in case share a pseudonym and
-  reveal as the spelling minted first ("GMBH" after "GmbH" reads back as
-  "GmbH"). With PERSON `[10, 20)` overlapping LOCATION `[15, 25)`, the output
+  detected span is replaced, whatever the overlap shape — apart from the
+  whitespace a remainder is trimmed of, which is emitted as itself — and every
+  pseudonym maps back to exactly the text it replaced, a remainder's mapping
+  holding the trimmed slice rather than the span it came from. Reveal returns
+  identical spellings character for character, bounded by one designed mapper
+  property that predates this change and applies to every entity:
+  `get_or_create` keys on `strip().lower()` and ignores the entity type, so
+  values differing only in case share a pseudonym. The spelling that comes
+  back, and the type label in that pseudonym, are those of whichever
+  occurrence was minted first — and minting runs back to front, so they come
+  from the LAST occurrence in the document ("GmbH … GMBH" reveals as "GMBH"
+  twice). With PERSON `[10, 20)` overlapping LOCATION `[15, 25)`, the output
   carries the PERSON pseudonym for `[10, 20)` and a LOCATION pseudonym whose
   original value is `text[20:25]`. This supersedes the interim behaviour on
   this release branch, which skipped the losing entity whole and left those
@@ -98,9 +116,32 @@ Entity semantics are unchanged apart from the overlap fix below.
   from the placeholder charset can land inside an already-inserted
   placeholder — an ID `12` alongside twelve people would turn
   `<<PERSON_12>>` into `<<PERSON_<<ID_1>>>>`, still masked but no longer
-  reversible. The map is checked against the pseudonymized text before it is
-  used; on a mismatch the file is converted to text instead, which keeps both
-  the masking and the reveal and loses only the formatting.
+  reversible — and an original can equally hit an occurrence the detector
+  never flagged ("Weber" inside "Weberstrasse"). The map is checked against
+  the pseudonymized text before it is used; on a mismatch the file is
+  converted to text instead, which keeps both the masking and the reveal and
+  loses only the formatting.
+
+- **A reconstructed DOCX or XLSX could ship PII the masked text had removed.**
+  The writers reach paragraph runs and string cells; documents have surfaces
+  that are neither, and the extracted text is not a map of where its
+  characters live in the file. Three shapes shipped the original next to its
+  own placeholder, and no check saw them: text in a **hyperlink run**
+  (python-docx counts it in `Paragraph.text` but leaves it out of
+  `Paragraph.runs` — a file came out reading `Kontakt: <<PERSON_1>>Anna
+  Beispiel`), an entity **spanning a paragraph break** (the extractor joins
+  paragraphs with a newline, so a detected span can match the flat text and no
+  paragraph at all), and a **numeric cell** in XLSX (the extractor stringifies
+  every cell, the writer only rewrites string ones, so a flagged customer
+  number stayed put). Reconstruction now verifies the artifact instead of the
+  plan: the bytes it produced are extracted again with the same extractor and
+  must yield the masked text, otherwise the file is refused and converted to
+  text. The guarantee is now stated in one line — a reconstructed file is
+  shipped only if extracting it reproduces the masked text — and the cost of a
+  refusal is formatting, never masking. Two accepted residuals, both on that
+  side of the trade: a document whose replacement would over-reach, and one
+  whose PII lives where the writers cannot go, come back as text rather than
+  as files.
 
 ## [0.1.2] — 2026-04-27
 

@@ -83,19 +83,23 @@ class PseudonymizationEngine:
         PII, and minting it would put a mapping in the way of the real value.
 
         Every character any entity covers is therefore replaced, whatever the
-        overlap shape, and every pseudonym maps back to exactly the text it
-        replaced — a remainder's mapping holds the trimmed slice, not the full
-        span. For PERSON [10, 20) overlapping LOCATION [15, 25) the output
-        carries the PERSON pseudonym for [10, 20) and a LOCATION pseudonym for
-        text[20:25]. Non-overlapping entities take the same path they always
-        did.
+        overlap shape — apart from the whitespace a remainder is trimmed of,
+        which is emitted as itself — and every pseudonym maps back to exactly
+        the text it replaced, a remainder's mapping holding the trimmed slice
+        rather than the full span. For PERSON [10, 20) overlapping LOCATION
+        [15, 25) the output carries the PERSON pseudonym for [10, 20) and a
+        LOCATION pseudonym for text[20:25]. Non-overlapping entities take the
+        same path they always did.
 
-        Reidentification restores the input exactly, up to one designed mapper
-        property that predates all of this and applies to every entity, not
-        just remainders: :meth:`PseudonymMapper.get_or_create` keys on
-        ``strip().lower()``, so values that differ only in case share one
-        pseudonym and reveal as the spelling that was minted first ("GMBH"
-        after "GmbH" reads back as "GmbH").
+        Reidentification restores identical spellings character for character.
+        It is bounded by one designed mapper property that predates all of
+        this and applies to every entity, not just remainders:
+        :meth:`PseudonymMapper.get_or_create` keys on ``strip().lower()`` and
+        ignores the entity type, so values differing only in case share one
+        pseudonym. Both the spelling that comes back and the type label in
+        that pseudonym are the ones of whichever occurrence was minted FIRST,
+        and minting runs back to front — so it is the LAST occurrence in the
+        document that supplies them ("GmbH … GMBH" reveals as "GMBH" twice).
 
         Pseudonyms are minted back-to-front, in the order the previous
         implementation used, remainders included: a remainder is minted in the
