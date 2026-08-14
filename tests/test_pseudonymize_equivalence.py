@@ -128,22 +128,47 @@ def test_single_pass_matches_legacy_with_a_labelled_mapper():
 #   2. nothing a detector flagged reaches the output in cleartext.
 #
 # (2) is only a sound substring check if every span has a distinct text, so
-# the generator draws from an alphabet of UNIQUE characters, each occurring at
-# most once. The alphabet is deliberately disjoint from the pseudonym charset
-# (`<`, `>`, `_`, uppercase, digits) so a one-character span cannot "appear"
-# inside a placeholder, and it holds no whitespace and no uppercase, so the
-# mapper's `strip().lower()` lookup key cannot collapse two different spans
-# onto one pseudonym.
+# the generator draws its NON-whitespace characters from an alphabet of unique
+# characters, each occurring at most once — any slice holding one of them
+# occurs exactly once in the text. That alphabet is deliberately disjoint from
+# the pseudonym charset (`<`, `>`, `_`, uppercase, digits) so a one-character
+# span cannot "appear" inside a placeholder, and it has no uppercase, so the
+# mapper's `strip().lower()` key cannot collapse two different spans onto one
+# pseudonym. Case collisions are a real mapper property and are pinned
+# explicitly by
+# `test_pseudonymization.py::test_pseudonymize_char_case_variants_share_one_mapping`;
+# keeping them out here is what makes the invariants above decidable.
+#
+# Whitespace IS sprinkled in, because remainders cut at arbitrary offsets and
+# the trimming that keeps their mappings clean has to hold under random
+# shapes. Entity edges are snapped off whitespace, the way real detector spans
+# are.
 
 _UNIQUE_ALPHABET = string.ascii_lowercase + "!#$%&()*+,-./:;=?@[]^{|}~"
+_WHITESPACE = " \t\n"
+
+
+def _random_text(rng: random.Random) -> str:
+    out: list[str] = []
+    for char in _UNIQUE_ALPHABET[: rng.randrange(20, len(_UNIQUE_ALPHABET) + 1)]:
+        out.append(char)
+        if rng.random() < 0.25:
+            out.append(rng.choice(_WHITESPACE))
+    return "".join(out)
 
 
 def _random_overlapping_case(rng: random.Random) -> tuple[str, list[DetectedEntity]]:
-    text = _UNIQUE_ALPHABET[: rng.randrange(20, len(_UNIQUE_ALPHABET) + 1)]
+    text = _random_text(rng)
     entities: list[DetectedEntity] = []
     for _ in range(rng.randrange(1, 9)):
         start = rng.randrange(len(text))
         end = min(len(text), start + rng.randrange(1, 12))
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start == end:
+            continue
         entities.append(
             DetectedEntity(
                 entity_type=rng.choice(_TYPES),
@@ -174,6 +199,7 @@ def test_overlapping_entities_round_trip_and_leave_no_cleartext():
     rng = random.Random(20260814)
     reident = ReidentificationEngine()
     overhangs_seen = 0
+    trimmed_overhangs_seen = 0
 
     for _ in range(_CASES):
         text, entities = _random_overlapping_case(rng)
@@ -192,7 +218,14 @@ def test_overlapping_entities_round_trip_and_leave_no_cleartext():
 
         for overhang in _overhangs(text, entities):
             overhangs_seen += 1
-            assert overhang not in pseudonymized
+            core = overhang.strip()
+            if core != overhang:
+                trimmed_overhangs_seen += 1
+            # Whitespace is emitted as literal text, the core never is.
+            if core:
+                assert core not in pseudonymized
 
-    # Guard against a vacuous run: the shapes this test exists for must occur.
+    # Guard against a vacuous run: the shapes this test exists for must occur,
+    # including remainders that need trimming.
     assert overhangs_seen > _CASES // 2
+    assert trimmed_overhangs_seen > _CASES // 10

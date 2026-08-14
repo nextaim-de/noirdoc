@@ -3,6 +3,7 @@ from __future__ import annotations
 from noirdoc.detection.base import DetectedEntity
 from noirdoc.pseudonymization.engine import PseudonymizationEngine
 from noirdoc.pseudonymization.mapper import PseudonymMapper
+from noirdoc.reidentification.engine import ReidentificationEngine
 
 
 def _ent(entity_type: str, text: str, start: int, end: int) -> DetectedEntity:
@@ -212,6 +213,75 @@ def test_pseudonymize_char_overlap_chain_masks_every_remainder():
     assert mapper.reverse_lookup("<<PERSON_1>>") == "0123456789"
     assert mapper.reverse_lookup("<<LOCATION_1>>") == "ABCDE"
     assert mapper.reverse_lookup("<<EMAIL_1>>") == "FGHIJ"
+
+
+def test_pseudonymize_char_remainder_is_trimmed_before_minting():
+    """A remainder's edge whitespace stays literal; only its core is minted.
+
+    The slice left of LOCATION [0, 17) is " am Main", starting with the space
+    that separates it from the winner. Minting the slice as-is would put a
+    mapping under the key "am main" whose stored value carries a leading
+    space, colliding with any real "am Main" entity and revealing with the
+    wrong spacing. Detector spans never carry edge whitespace; remainders are
+    trimmed so they do not either, and the space is emitted as plain text.
+    """
+    text = "Frankfurt am Main"
+    entities = [
+        _ent("ORGANIZATION", "Frankfurt", 0, 9),
+        _ent("LOCATION", text, 0, 17),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(text, entities, mapper)
+
+    assert result == "<<ORGANIZATION_1>> <<LOCATION_1>>"
+    assert mapper.calls == [("am Main", "LOCATION"), ("Frankfurt", "ORGANIZATION")]
+    assert mapper.reverse_lookup("<<LOCATION_1>>") == "am Main"
+    assert ReidentificationEngine().reidentify(result, mapper) == text
+
+
+def test_pseudonymize_char_whitespace_only_remainder_mints_nothing():
+    """Whitespace is not PII: a remainder with no core is emitted verbatim."""
+    text = "Max Mueller"
+    entities = [
+        _ent("PERSON", "Max", 0, 3),
+        _ent("PERSON", "Max ", 0, 4),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(text, entities, mapper)
+
+    assert result == "<<PERSON_1>> Mueller"
+    assert mapper.calls == [("Max", "PERSON")]
+    assert mapper.entity_count == 1
+    assert ReidentificationEngine().reidentify(result, mapper) == text
+
+
+def test_pseudonymize_char_case_variants_share_one_mapping():
+    """Designed mapper behaviour, pinned: case-insensitive dedup, first spelling wins.
+
+    `PseudonymMapper.get_or_create` keys on `strip().lower()`, so two entities
+    whose spellings differ only in case get ONE pseudonym, and the reveal
+    restores whichever spelling was minted first — here "GMBH", because
+    minting runs back to front. A round-trip is therefore exact only up to
+    that dedup. This predates overlap handling and applies to every entity,
+    not just remainders.
+
+    The whitespace half of the same class — a mapping keyed "gmbh" whose
+    stored value is " GmbH" — is unreachable: remainders are trimmed before
+    they are minted, and detector spans do not carry edge whitespace. If the
+    mapper's key ever changes, this test is the one that should notice.
+    """
+    text = "GmbH und GMBH"
+    entities = [
+        _ent("ORGANIZATION", "GmbH", 0, 4),
+        _ent("ORGANIZATION", "GMBH", 9, 13),
+    ]
+    mapper = PseudonymMapper()
+    result = PseudonymizationEngine().pseudonymize(text, entities, mapper)
+
+    assert result == "<<ORGANIZATION_1>> und <<ORGANIZATION_1>>"
+    assert mapper.entity_count == 1
+    assert mapper.reverse_lookup("<<ORGANIZATION_1>>") == "GMBH"
+    assert ReidentificationEngine().reidentify(result, mapper) == "GMBH und GMBH"
 
 
 def test_pseudonymize_char_clip_uses_the_earlier_start_not_the_longer_span():

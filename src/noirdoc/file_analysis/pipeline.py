@@ -16,6 +16,7 @@ from noirdoc.file_analysis.extractor import FileTextExtractor
 from noirdoc.file_analysis.mime import PROVIDER_PASSABLE_MIMES
 from noirdoc.file_analysis.models import FileAnalysisMode, FileAnalysisResult, FileBlock
 from noirdoc.file_analysis.policy import FileAnalysisPolicy
+from noirdoc.file_analysis.reconstruction import pseudonymize_block
 from noirdoc.pseudonymization.engine import PseudonymizationEngine
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 
@@ -147,11 +148,9 @@ async def analyze_files_in_body(
 
         # 5. Pseudonymize
         if policy.should_pseudonymize() and block.entities and block.extracted_text:
-            block.pseudonymized_text = pseudo_engine.pseudonymize(
-                block.extracted_text,
-                block.entities,
-                mapper,
-            )
+            # Records the emitted placeholders on the block as well:
+            # reconstruction rewrites the file from them, not from offsets.
+            pseudonymize_block(block, mapper, pseudo_engine)
 
     result.blocks = file_blocks
 

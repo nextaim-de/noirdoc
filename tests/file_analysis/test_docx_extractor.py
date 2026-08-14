@@ -7,7 +7,8 @@ import io
 from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.extractors.docx_ext import extract_docx
 from noirdoc.file_analysis.models import FileBlock
-from noirdoc.file_analysis.reconstruction import _reconstruct_docx
+from noirdoc.file_analysis.reconstruction import _reconstruct_docx, pseudonymize_block
+from noirdoc.pseudonymization.mapper import PseudonymMapper
 
 
 def _entity(text: str, in_text: str) -> DetectedEntity:
@@ -64,13 +65,6 @@ def test_reconstruct_docx_replaces_text_in_headers_and_footers():
     docx_bytes = _docx_with_headers_footers_and_body()
     extracted = extract_docx(docx_bytes)
 
-    # Build a synthetic pseudonymized result: replace each name with a token
-    pseudonymized = (
-        extracted.replace("Anna Mueller", "<<PERSON_1>>")
-        .replace("Bernd Schmidt", "<<PERSON_2>>")
-        .replace("Carla Weber", "<<PERSON_3>>")
-    )
-
     entities = [
         _entity("Anna Mueller", extracted),
         _entity("Bernd Schmidt", extracted),
@@ -83,9 +77,11 @@ def test_reconstruct_docx_replaces_text_in_headers_and_footers():
         source_path="test.docx",
         source_type="file",
         extracted_text=extracted,
-        pseudonymized_text=pseudonymized,
         entities=entities,
     )
+    # Goes through the real substitution so the block carries the emitted
+    # placeholders reconstruction rewrites from.
+    pseudonymize_block(block, PseudonymMapper())
 
     new_bytes = _reconstruct_docx(block)
     assert new_bytes is not None

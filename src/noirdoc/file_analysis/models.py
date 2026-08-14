@@ -6,6 +6,7 @@ import enum
 from dataclasses import dataclass, field
 
 from noirdoc.detection.base import DetectedEntity
+from noirdoc.pseudonymization.engine import EmittedSpan
 
 
 class FileAnalysisMode(enum.StrEnum):
@@ -26,6 +27,11 @@ class FileBlock:
     extracted_text: str | None = None
     entities: list[DetectedEntity] = field(default_factory=list)
     pseudonymized_text: str | None = None
+    # What the pseudonymizer actually emitted: original -> placeholder, in
+    # output order. Reconstruction needs it to rewrite DOCX runs and XLSX
+    # cells; None means "not pseudonymized here", and reconstruction refuses
+    # rather than guessing the pairing from entity offsets.
+    emitted_spans: list[EmittedSpan] | None = None
     reconstructed_bytes: bytes | None = None
     extraction_error: str | None = None
 

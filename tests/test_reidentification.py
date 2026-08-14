@@ -141,7 +141,9 @@ def test_roundtrip_mixed_document_with_an_overlap():
 
     The second "Weber" is flagged both as a PERSON and as the head of an
     ORGANIZATION. PERSON wins the shared start, so the organization is masked
-    as its remainder " GmbH" — and the reveal puts the whole name back.
+    as its remainder — "GmbH", the slice " GmbH" without the space it starts
+    with, which is emitted as literal text — and the reveal puts the whole
+    name back.
     """
     original = "Anna Weber wohnt in Berlin und arbeitet bei Weber GmbH in Hamburg."
     org_start = original.index("Weber GmbH")
@@ -164,7 +166,8 @@ def test_roundtrip_mixed_document_with_an_overlap():
     assert "GmbH" not in pseudonymized
     assert "Berlin" not in pseudonymized
     assert "Hamburg" not in pseudonymized
-    assert mapper.reverse_lookup("<<ORGANIZATION_1>>") == " GmbH"
+    assert mapper.reverse_lookup("<<ORGANIZATION_1>>") == "GmbH"
+    assert "bei <<PERSON_1>> <<ORGANIZATION_1>> in" in pseudonymized
 
     assert ReidentificationEngine().reidentify(pseudonymized, mapper) == original
 

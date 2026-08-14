@@ -15,11 +15,17 @@ from __future__ import annotations
 import io
 from typing import TYPE_CHECKING, Protocol
 
+import structlog
+
 if TYPE_CHECKING:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
     from noirdoc.file_analysis.models import FileBlock
+    from noirdoc.pseudonymization.engine import PseudonymizationEngine
+    from noirdoc.pseudonymization.mapper import PseudonymMapper
+
+logger = structlog.get_logger()
 
 
 class _BlockContainer(Protocol):
@@ -45,6 +51,35 @@ _RECONSTRUCTABLE_MIMES = {
 def can_reconstruct(mime_type: str) -> bool:
     """Return ``True`` if in-place content replacement is supported for *mime_type*."""
     return mime_type in _RECONSTRUCTABLE_MIMES
+
+
+def pseudonymize_block(
+    block: FileBlock,
+    mapper: PseudonymMapper,
+    engine: PseudonymizationEngine | None = None,
+) -> str | None:
+    """Pseudonymize ``block.extracted_text`` and record what reconstruction needs.
+
+    Sets ``pseudonymized_text`` and ``emitted_spans`` together. Reconstruction
+    rewrites the file itself — DOCX runs, XLSX cells — not the extracted text,
+    so it needs to know which placeholder replaced which original. Producing
+    both here keeps that pairing with the substitution that created it;
+    reconstructing it afterwards from entity offsets means a second copy of
+    the overlap semantics, which is exactly what used to drift.
+    """
+    from noirdoc.pseudonymization.engine import PseudonymizationEngine
+
+    if block.extracted_text is None:
+        return None
+
+    text, spans = (engine or PseudonymizationEngine()).pseudonymize_detailed(
+        block.extracted_text,
+        block.entities,
+        mapper,
+    )
+    block.pseudonymized_text = text
+    block.emitted_spans = spans
+    return text
 
 
 def reconstruct(block: FileBlock) -> bytes | None:
@@ -111,6 +146,8 @@ def _reconstruct_docx(block: FileBlock) -> bytes | None:
         return None
 
     replacements = _build_replacements(block)
+    if replacements is None:
+        return None  # cannot pair placeholders with originals — refuse
     if not replacements:
         return block.content_bytes  # nothing to replace
 
@@ -167,6 +204,9 @@ def _reconstruct_xlsx(block: FileBlock) -> bytes | None:
         return None
 
     replacements = _build_replacements(block)
+    if replacements is None:
+        wb.close()
+        return None  # cannot pair placeholders with originals — refuse
     if not replacements:
         buf = io.BytesIO()
         wb.save(buf)
@@ -195,36 +235,35 @@ def _reconstruct_xlsx(block: FileBlock) -> bytes | None:
 # ---------------------------------------------------------------------------
 
 
-def _build_replacements(block: FileBlock) -> dict[str, str]:
-    """Map original entity text -> pseudonym using the block's detected entities.
+def _build_replacements(block: FileBlock) -> dict[str, str] | None:
+    """Map original text -> placeholder from what the pseudonymizer emitted.
 
-    We rely on the pseudonymized_text already containing the replacements, but
-    for DOCX/XLSX reconstruction we need per-entity mapping.  The entities
-    store the original ``text`` and the mapper assigned pseudonyms when
-    ``pseudonymize()`` was called; we reconstruct the mapping from the entities
-    and the pseudonymized_text.
+    The pairing comes from :func:`pseudonymize_block`, which records it while
+    substituting. It is not re-derived from entity offsets: an overlapping
+    entity contributes a placeholder of its own for the remainder that reaches
+    past the winning span, and offset arithmetic over the entity list cannot
+    see it — every later entity then lands on the wrong offset and is either
+    dropped or paired with someone else's placeholder.
+
+    Longest original first, so a short original cannot eat a longer one it is
+    contained in ("Weber" inside "Anna Weber") before that longer one is
+    replaced.
+
+    Returns ``None`` when the block has entities but no record of the
+    substitution: the caller must not rewrite the file from a guess, and
+    falling back to the converted text is the safe answer.
     """
     if not block.entities or not block.extracted_text or not block.pseudonymized_text:
         return {}
 
-    # Simple approach: for each entity, compute what it was replaced with.
-    # Entities are sorted by start position; pseudonymize replaces from end to start,
-    # so the offsets stay valid.  We rebuild the mapping here.
-    replacements: dict[str, str] = {}
-    pseudo = block.pseudonymized_text
+    if block.emitted_spans is None:
+        logger.warning(
+            "reconstruction.missing_emitted_spans",
+            path=block.source_path,
+            mime=block.mime_type,
+            entity_count=len(block.entities),
+        )
+        return None
 
-    # Walk entities and find corresponding pseudonyms via offset tracking
-    offset_shift = 0
-    for entity in sorted(block.entities, key=lambda e: e.start):
-        orig_text = entity.text
-        # Find the pseudonym in the pseudonymized text at the shifted position
-        pseudo_start = entity.start + offset_shift
-        # The pseudonym token looks like <<TYPE_N>> – find it
-        if pseudo_start < len(pseudo) and pseudo[pseudo_start:].startswith("<<"):
-            end = pseudo.find(">>", pseudo_start)
-            if end != -1:
-                pseudo_token = pseudo[pseudo_start : end + 2]
-                replacements[orig_text] = pseudo_token
-                offset_shift += len(pseudo_token) - len(orig_text)
-
-    return replacements
+    spans = sorted(block.emitted_spans, key=lambda s: len(s.original), reverse=True)
+    return {span.original: span.pseudonym for span in spans}

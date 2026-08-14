@@ -227,8 +227,11 @@ class Redactor:
         from noirdoc.file_analysis.extractor import FileTextExtractor
         from noirdoc.file_analysis.mime import format_for_mime
         from noirdoc.file_analysis.models import FileBlock
-        from noirdoc.file_analysis.reconstruction import can_reconstruct, reconstruct
-        from noirdoc.pseudonymization.engine import PseudonymizationEngine
+        from noirdoc.file_analysis.reconstruction import (
+            can_reconstruct,
+            pseudonymize_block,
+            reconstruct,
+        )
 
         content = path.read_bytes()
         mime = _detect_mime(path, content)
@@ -280,8 +283,9 @@ class Redactor:
         entities = await detector.detect(text, language)
         block.entities = entities
 
-        pseudonymized = PseudonymizationEngine().pseudonymize(text, entities, self._mapper)
-        block.pseudonymized_text = pseudonymized
+        # Records the emitted placeholders on the block: reconstruction needs
+        # them to rewrite DOCX runs / XLSX cells.
+        pseudonymized = pseudonymize_block(block, self._mapper) or ""
 
         entity_types: dict[str, int] = {}
         for e in entities:
