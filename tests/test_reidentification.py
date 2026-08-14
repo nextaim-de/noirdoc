@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from noirdoc.detection.base import DetectedEntity
+from noirdoc.mappings.hydration import hydrate_mapper
 from noirdoc.pseudonymization.engine import PseudonymizationEngine
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 from noirdoc.reidentification.engine import ReidentificationEngine
@@ -85,6 +86,92 @@ def test_full_roundtrip():
 
     reidentified = reident_engine.reidentify(pseudonymized, mapper)
     assert reidentified == original
+
+
+# ── Round-trip over overlapping spans ─────────────────────
+#
+# Overlaps are masked in two pieces: the span that starts first is replaced
+# whole, and what is left of the loser is replaced under its own mapping. Both
+# pieces are ordinary mappings, so reidentification restores the original text
+# character for character.
+
+_RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _ent(entity_type: str, text: str, start: int, end: int) -> DetectedEntity:
+    return DetectedEntity(
+        entity_type=entity_type,
+        text=text,
+        start=start,
+        end=end,
+        score=0.9,
+        source="test",
+    )
+
+
+def test_roundtrip_overlapping_remainder():
+    """PERSON [10, 20) overlapping LOCATION [15, 25): both pieces come back."""
+    entities = [
+        _ent("PERSON", _RULER[10:20], 10, 20),
+        _ent("LOCATION", _RULER[15:25], 15, 25),
+    ]
+    mapper = PseudonymMapper()
+    pseudonymized = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert pseudonymized == "0123456789<<PERSON_1>><<LOCATION_1>>PQRSTUVWXYZ"
+    assert ReidentificationEngine().reidentify(pseudonymized, mapper) == _RULER
+
+
+def test_roundtrip_overlap_chain():
+    """Three chained spans, two of them reduced to remainders."""
+    entities = [
+        _ent("PERSON", _RULER[0:10], 0, 10),
+        _ent("LOCATION", _RULER[5:15], 5, 15),
+        _ent("EMAIL", _RULER[8:20], 8, 20),
+    ]
+    mapper = PseudonymMapper()
+    pseudonymized = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert pseudonymized == "<<PERSON_1>><<LOCATION_1>><<EMAIL_1>>KLMNOPQRSTUVWXYZ"
+    assert ReidentificationEngine().reidentify(pseudonymized, mapper) == _RULER
+
+
+def test_roundtrip_mixed_document_with_an_overlap():
+    """A document mixing plain entities with one overlapping pair.
+
+    The second "Weber" is flagged both as a PERSON and as the head of an
+    ORGANIZATION. PERSON wins the shared start, so the organization is masked
+    as its remainder " GmbH" — and the reveal puts the whole name back.
+    """
+    original = "Anna Weber wohnt in Berlin und arbeitet bei Weber GmbH in Hamburg."
+    org_start = original.index("Weber GmbH")
+    entities = [
+        _ent("PERSON", "Anna Weber", 0, 10),
+        _ent("LOCATION", "Berlin", original.index("Berlin"), original.index("Berlin") + 6),
+        _ent("PERSON", "Weber", org_start, org_start + 5),
+        _ent("ORGANIZATION", "Weber GmbH", org_start, org_start + 10),
+        _ent(
+            "LOCATION",
+            "Hamburg",
+            original.index("Hamburg"),
+            original.index("Hamburg") + 7,
+        ),
+    ]
+    mapper = PseudonymMapper()
+    pseudonymized = PseudonymizationEngine().pseudonymize(original, entities, mapper)
+
+    assert "Weber" not in pseudonymized
+    assert "GmbH" not in pseudonymized
+    assert "Berlin" not in pseudonymized
+    assert "Hamburg" not in pseudonymized
+    assert mapper.reverse_lookup("<<ORGANIZATION_1>>") == " GmbH"
+
+    assert ReidentificationEngine().reidentify(pseudonymized, mapper) == original
+
+    # The same holds for a mapper rebuilt from the persisted mapping dict —
+    # remainders are stored and restored like any other pseudonym.
+    rehydrated = hydrate_mapper(mapper.get_mapping_summary())
+    assert ReidentificationEngine().reidentify(pseudonymized, rehydrated) == original
 
 
 def test_reidentify_partial_stats():

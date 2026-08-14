@@ -85,6 +85,9 @@ def test_offsets_preserved_with_replacement():
 
 # --- Characterization of pseudonymize ---
 
+# A fixed ruler string: index 10 is "A", index 15 is "F", index 25 is "P".
+_RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
 
 class RecordingMapper(PseudonymMapper):
     """PseudonymMapper that records every get_or_create call in order."""
@@ -104,6 +107,10 @@ def test_pseudonymize_char_mapping_assigned_back_to_front():
     The counters are order-sensitive, so the last entity in the text gets
     `_1`. This is part of the public call pattern: the gateway persists
     mappings, so the numbering must not change.
+
+    A masked remainder is minted in the losing entity's own slot: it replaces
+    the loser in the same descending walk, so an overlapping pair numbers
+    exactly like a non-overlapping one.
     """
     text = "Anna und Bert"
     entities = [_ent("PERSON", "Anna", 0, 4), _ent("PERSON", "Bert", 9, 13)]
@@ -111,6 +118,18 @@ def test_pseudonymize_char_mapping_assigned_back_to_front():
     result = PseudonymizationEngine().pseudonymize(text, entities, mapper)
     assert mapper.calls == [("Bert", "PERSON"), ("Anna", "PERSON")]
     assert result == "<<PERSON_2>> und <<PERSON_1>>"
+
+    # Same walk with an overlap: the winner [10, 20) and the remainder
+    # [20, 25) of the loser [15, 25). The remainder is minted first because
+    # it sits later in the text, so it takes `_1`.
+    overlapping = [
+        _ent("PERSON", _RULER[10:20], 10, 20),
+        _ent("PERSON", _RULER[15:25], 15, 25),
+    ]
+    overlap_mapper = RecordingMapper()
+    overlap_result = PseudonymizationEngine().pseudonymize(_RULER, overlapping, overlap_mapper)
+    assert overlap_mapper.calls == [("KLMNO", "PERSON"), ("ABCDEFGHIJ", "PERSON")]
+    assert overlap_result == "0123456789<<PERSON_2>><<PERSON_1>>PQRSTUVWXYZ"
 
 
 def test_pseudonymize_char_input_order_does_not_matter():
@@ -123,12 +142,8 @@ def test_pseudonymize_char_input_order_does_not_matter():
     assert forward == reverse == "<<PERSON_2>> und <<PERSON_1>>"
 
 
-# A fixed ruler string: index 10 is "A", index 15 is "F", index 25 is "P".
-_RULER = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-
-def test_pseudonymize_char_overlapping_entities_are_clipped():
-    """Overlapping entities: the first span wins, the loser's tail stays unmasked.
+def test_pseudonymize_char_overlapping_remainder_is_masked():
+    """Overlapping entities: the first span wins, the loser's tail is masked too.
 
     Two overlapping entities of different types survive the merge as a
     deliberate dual-type annotation (see `_merge_entities` rule 4).
@@ -143,20 +158,19 @@ def test_pseudonymize_char_overlapping_entities_are_clipped():
     — a half-eaten placeholder that no reverse mapping can undo, plus a phantom
     LOCATION mapping whose original value is not present in the output.
 
-    AFTER: the single-pass builder consumes [10, 20) for PERSON and skips
-    LOCATION entirely, because it starts inside the consumed span. Skipped is
-    skipped: `get_or_create` is not called for it, so no phantom mapping is
-    minted.
+    THEN the single-pass builder dropped the loser whole, which was clean but
+    left its overhang in cleartext:
 
-    THE CAVEAT IS NOT MERELY A LOST ANNOTATION — IT IS RESIDUAL CLEARTEXT.
-    The asserted output ends "...<<PERSON_1>>KLMNOPQRSTUVWXYZ", and the "KLMNO"
-    in it is text[20:25]: the tail of the LOCATION span the detectors flagged,
-    now emitted verbatim. The old corrupt path did not print those five
-    characters, because the LOCATION substitution had consumed [15, 25). So
-    this change trades "corrupt but fully masked" for "clean but partially
-    unmasked" on overlapping spans. Masking the remainder slice
-    text[consumed_to:entity.end] under its own mapping would give full
-    coverage and stay reversible; it is deliberately out of scope here.
+        "0123456789<<PERSON_1>>KLMNOPQRSTUVWXYZ"
+
+    — "KLMNO" is text[20:25], the tail of a span the detectors flagged.
+
+    NOW the loser contributes its remainder: PERSON consumes [10, 20), and the
+    part of LOCATION beyond that, text[20:25] == "KLMNO", is pseudonymized
+    under its own LOCATION mapping. Both pseudonyms are whole, the mapping's
+    original text is the remainder slice — not the full LOCATION span, which
+    never reaches the output — and nothing the detectors flagged survives in
+    cleartext.
     """
     entities = [
         _ent("PERSON", _RULER[10:20], 10, 20),
@@ -165,18 +179,48 @@ def test_pseudonymize_char_overlapping_entities_are_clipped():
     mapper = RecordingMapper()
     result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
 
-    assert result == "0123456789<<PERSON_1>>KLMNOPQRSTUVWXYZ"
-    assert mapper.calls == [("ABCDEFGHIJ", "PERSON")]
-    assert mapper.entity_count == 1
+    assert result == "0123456789<<PERSON_1>><<LOCATION_1>>PQRSTUVWXYZ"
+    assert mapper.calls == [("KLMNO", "LOCATION"), ("ABCDEFGHIJ", "PERSON")]
+    assert mapper.entity_count == 2
     assert mapper.reverse_lookup("<<PERSON_1>>") == "ABCDEFGHIJ"
+    assert mapper.reverse_lookup("<<LOCATION_1>>") == "KLMNO"
+
+
+def test_pseudonymize_char_overlap_chain_masks_every_remainder():
+    """A chain of overlaps composes: each span contributes what is left of it.
+
+    PERSON [0, 10) wins outright; LOCATION [5, 15) contributes [10, 15) and
+    EMAIL [8, 20) contributes [15, 20). The three pseudonyms tile [0, 20)
+    exactly, so the covered region is fully masked and every mapping stores
+    the slice it actually replaced.
+    """
+    entities = [
+        _ent("PERSON", _RULER[0:10], 0, 10),
+        _ent("LOCATION", _RULER[5:15], 5, 15),
+        _ent("EMAIL", _RULER[8:20], 8, 20),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(_RULER, entities, mapper)
+
+    assert result == "<<PERSON_1>><<LOCATION_1>><<EMAIL_1>>KLMNOPQRSTUVWXYZ"
+    assert mapper.calls == [
+        ("FGHIJ", "EMAIL"),
+        ("ABCDE", "LOCATION"),
+        ("0123456789", "PERSON"),
+    ]
+    assert mapper.entity_count == 3
+    assert mapper.reverse_lookup("<<PERSON_1>>") == "0123456789"
+    assert mapper.reverse_lookup("<<LOCATION_1>>") == "ABCDE"
+    assert mapper.reverse_lookup("<<EMAIL_1>>") == "FGHIJ"
 
 
 def test_pseudonymize_char_clip_uses_the_earlier_start_not_the_longer_span():
-    """The clip is decided by start offset alone — the first span consumes.
+    """The consuming span is decided by start offset alone — the first one wins.
 
-    No cleartext survives here: the skipped PERSON span lies entirely inside
-    the LOCATION span that won. Residual cleartext only appears when the loser
-    reaches beyond the winner's end, as in the test above.
+    Nothing is left over here: the losing PERSON span lies entirely inside the
+    LOCATION span that won, so there is no remainder to mask and no mapping to
+    mint for it. Remainders only appear when the loser reaches beyond the
+    winner's end, as in the test above.
     """
     entities = [
         _ent("LOCATION", _RULER[10:30], 10, 30),
@@ -196,16 +240,14 @@ def test_pseudonymize_char_identical_span_dual_type_leaks_nothing():
     partial overlap but the exact same characters flagged as PERSON by one
     detector and as LOCATION by another. Both decision-relevant facts:
 
-    (a) Nothing leaks. The residual cleartext of a clip is
+    (a) The loser is consumed whole. Its remainder is
         text[winner.end:loser.end], which is empty when the spans end
-        together, so the identical-span case is fully masked — unlike the
-        partial overlap in `..._are_clipped` above, which leaves "KLMNO".
+        together, so there is nothing left to mask and exactly one mapping is
+        minted — unlike the partial overlap in `..._remainder_is_masked`
+        above, which mints a second one for "KLMNO".
     (b) The tie is resolved by the caller's list order. Both spans start at
         10, the sort is stable, so whichever entity the caller listed first
         wins and supplies the label in the output.
-
-    This test lives in the clip commit's drop radius: it asserts the clipped
-    behavior and must go if the clip is dropped.
     """
     as_person_first = [
         _ent("PERSON", _RULER[10:20], 10, 20),

@@ -8,16 +8,21 @@ bytes, same mapping, same pseudonym numbering.
 Overlapping entities are the one deliberate difference — the old loop spliced
 pseudonyms into already-substituted text and corrupted the output. That change
 is pinned by
-`tests/test_pseudonymization.py::test_pseudonymize_char_overlapping_entities_are_clipped`.
+`tests/test_pseudonymization.py::test_pseudonymize_char_overlapping_remainder_is_masked`,
+and the overlapping shapes get their own property test at the bottom of this
+file: no oracle to compare against, so the invariants are round-trip identity
+and full masking.
 """
 
 from __future__ import annotations
 
 import random
+import string
 
 from noirdoc.detection.base import DetectedEntity
 from noirdoc.pseudonymization.engine import PseudonymizationEngine
 from noirdoc.pseudonymization.mapper import PseudonymMapper
+from noirdoc.reidentification.engine import ReidentificationEngine
 
 # --- Oracle: the pre-0.1.3 implementation ---
 
@@ -112,3 +117,82 @@ def test_single_pass_matches_legacy_with_a_labelled_mapper():
 
         assert actual == expected
         assert _mapper_state(new_mapper) == _mapper_state(legacy_mapper)
+
+
+# --- Overlapping entities: no oracle, invariants instead ---
+#
+# The old loop is not a usable oracle here — it corrupted overlapping output.
+# Two invariants stand in for it:
+#
+#   1. reidentify(pseudonymize(text)) == text, and
+#   2. nothing a detector flagged reaches the output in cleartext.
+#
+# (2) is only a sound substring check if every span has a distinct text, so
+# the generator draws from an alphabet of UNIQUE characters, each occurring at
+# most once. The alphabet is deliberately disjoint from the pseudonym charset
+# (`<`, `>`, `_`, uppercase, digits) so a one-character span cannot "appear"
+# inside a placeholder, and it holds no whitespace and no uppercase, so the
+# mapper's `strip().lower()` lookup key cannot collapse two different spans
+# onto one pseudonym.
+
+_UNIQUE_ALPHABET = string.ascii_lowercase + "!#$%&()*+,-./:;=?@[]^{|}~"
+
+
+def _random_overlapping_case(rng: random.Random) -> tuple[str, list[DetectedEntity]]:
+    text = _UNIQUE_ALPHABET[: rng.randrange(20, len(_UNIQUE_ALPHABET) + 1)]
+    entities: list[DetectedEntity] = []
+    for _ in range(rng.randrange(1, 9)):
+        start = rng.randrange(len(text))
+        end = min(len(text), start + rng.randrange(1, 12))
+        entities.append(
+            DetectedEntity(
+                entity_type=rng.choice(_TYPES),
+                text=text[start:end],
+                start=start,
+                end=end,
+                score=0.9,
+                source="test",
+            )
+        )
+    rng.shuffle(entities)
+    return text, entities
+
+
+def _overhangs(text: str, entities: list[DetectedEntity]) -> list[str]:
+    """The slices a clip would have dropped: loser characters past the winner."""
+    slices: list[str] = []
+    consumed_to = 0
+    for entity in sorted(entities, key=lambda e: e.start):
+        if entity.start < consumed_to < entity.end:
+            slices.append(text[consumed_to : entity.end])
+        consumed_to = max(consumed_to, entity.end)
+    return slices
+
+
+def test_overlapping_entities_round_trip_and_leave_no_cleartext():
+    """Every flagged character is masked, and the reveal restores the original."""
+    rng = random.Random(20260814)
+    reident = ReidentificationEngine()
+    overhangs_seen = 0
+
+    for _ in range(_CASES):
+        text, entities = _random_overlapping_case(rng)
+
+        mapper = PseudonymMapper()
+        pseudonymized = PseudonymizationEngine().pseudonymize(text, list(entities), mapper)
+
+        assert reident.reidentify(pseudonymized, mapper) == text, (
+            f"round-trip broke on {text!r} / {entities!r}"
+        )
+
+        for entity in entities:
+            assert entity.text not in pseudonymized, (
+                f"cleartext {entity.text!r} survived in {pseudonymized!r}"
+            )
+
+        for overhang in _overhangs(text, entities):
+            overhangs_seen += 1
+            assert overhang not in pseudonymized
+
+    # Guard against a vacuous run: the shapes this test exists for must occur.
+    assert overhangs_seen > _CASES // 2
