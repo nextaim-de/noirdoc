@@ -61,8 +61,7 @@ Entity semantics are unchanged apart from the overlap fix below.
   **not** implemented here, because it goes beyond the reviewed scope of this
   change: keep the skip for the mapping decision, but pseudonymize the
   remainder slice `text[consumed_to:entity.end]` under its own mapping —
-  full coverage, still reversible, still one pass. Say the word and it will
-  be added.
+  full coverage, still reversible, still one pass.
 
 ## [0.1.2] — 2026-04-27
 

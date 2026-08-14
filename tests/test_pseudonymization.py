@@ -189,6 +189,44 @@ def test_pseudonymize_char_clip_uses_the_earlier_start_not_the_longer_span():
     assert mapper.calls == [("ABCDEFGHIJKLMNOPQRST", "LOCATION")]
 
 
+def test_pseudonymize_char_identical_span_dual_type_leaks_nothing():
+    """The common real overlap: two detectors, one span, two labels.
+
+    This is what a dual-type annotation usually looks like in practice — not a
+    partial overlap but the exact same characters flagged as PERSON by one
+    detector and as LOCATION by another. Both decision-relevant facts:
+
+    (a) Nothing leaks. The residual cleartext of a clip is
+        text[winner.end:loser.end], which is empty when the spans end
+        together, so the identical-span case is fully masked — unlike the
+        partial overlap in `..._are_clipped` above, which leaves "KLMNO".
+    (b) The tie is resolved by the caller's list order. Both spans start at
+        10, the sort is stable, so whichever entity the caller listed first
+        wins and supplies the label in the output.
+
+    This test lives in the clip commit's drop radius: it asserts the clipped
+    behavior and must go if the clip is dropped.
+    """
+    as_person_first = [
+        _ent("PERSON", _RULER[10:20], 10, 20),
+        _ent("LOCATION", _RULER[10:20], 10, 20),
+    ]
+    mapper = RecordingMapper()
+    result = PseudonymizationEngine().pseudonymize(_RULER, as_person_first, mapper)
+
+    assert result == "0123456789<<PERSON_1>>KLMNOPQRSTUVWXYZ"
+    assert result.endswith(_RULER[20:])  # nothing of either span survives
+    assert mapper.calls == [("ABCDEFGHIJ", "PERSON")]
+    assert mapper.entity_count == 1
+
+    location_first = RecordingMapper()
+    flipped = PseudonymizationEngine().pseudonymize(
+        _RULER, list(reversed(as_person_first)), location_first
+    )
+    assert flipped == "0123456789<<LOCATION_1>>KLMNOPQRSTUVWXYZ"
+    assert location_first.calls == [("ABCDEFGHIJ", "LOCATION")]
+
+
 def test_pseudonymize_char_adjacent_entities_are_not_clipped():
     """Touching but non-overlapping spans (end == next start) both survive."""
     entities = [
