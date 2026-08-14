@@ -88,7 +88,7 @@ Run `noirdoc <cmd> --help` for the full flag list on any subcommand.
 A few honest caveats before you ship this into a pipeline:
 
 - **Best results need `[full]`.** On first use (or via `noirdoc models pull`) the full extra downloads roughly **560 MB** of weights: spaCy `de_core_news_lg`, Flair `ner-german-large`, and a GLiNER multilingual model. Budget disk and bandwidth.
-- **PDF reveal is not supported yet.** Round-tripping placeholders back into a PDF is a hard problem (position drift, font metrics, image-based redactions). PDFs redact cleanly; reveal is pass-through. DOCX, XLSX, and plain text round-trip fully.
+- **PDF reveal is not supported yet.** Round-tripping placeholders back into a PDF is a hard problem (position drift, font metrics, image-based redactions). PDFs redact cleanly; reveal is pass-through. DOCX, XLSX, and plain text round-trip — keeping their formatting whenever the redacted file verifies, see [Supported formats](#supported-formats).
 - **Alpha API.** Classes and CLI flags may change between `0.1.x` and `0.2.x`. Pin accordingly.
 - **Detector quality depends on the upstream models.** Presidio + Flair + GLiNER do the heavy lifting. Noirdoc adds German-specific recognizers on top, but it does not train models.
 
@@ -112,10 +112,12 @@ If you're working with German legal, medical, HR, or financial documents, this i
 | Format                       | Redact | Reveal (round-trip) |
 |------------------------------|--------|---------------------|
 | PDF                          | ✓      | ✗ (pass-through)    |
-| DOCX                         | ✓      | ✓                   |
-| XLSX                         | ✓      | ✓                   |
+| DOCX                         | ✓ \*   | ✓                   |
+| XLSX                         | ✓ \*   | ✓                   |
 | Plain text / CSV / MD / HTML | ✓      | ✓                   |
 | PPTX / images                | ✓      | ✗ (pass-through)    |
+
+\* **Formatting is best-effort; masking is not.** A redacted DOCX or XLSX is shipped as a file only if reading it back yields exactly the masked text. Where it does not — PII inside a hyperlink, an entity running across a paragraph break, a replacement that would also hit an occurrence nothing flagged — the content is shipped masked as plain text instead. You can lose the layout; you do not lose the redaction.
 
 PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md).
 

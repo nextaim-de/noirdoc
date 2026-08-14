@@ -27,6 +27,10 @@ class FileBlock:
     extracted_text: str | None = None
     entities: list[DetectedEntity] = field(default_factory=list)
     pseudonymized_text: str | None = None
+    # Set by the column-aware XLSX path, and cached here by `reconstruct()`
+    # after a successful rebuild — which also makes it the short-circuit on
+    # the next call, so changing pseudonymized_text or emitted_spans
+    # afterwards does not rebuild anything.
     reconstructed_bytes: bytes | None = None
     extraction_error: str | None = None
     # New fields go at the END: callers may construct this positionally, so

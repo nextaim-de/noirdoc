@@ -45,11 +45,12 @@ Entity semantics are unchanged apart from the overlap fix below.
   | 1 000 | 200 KB | 7.1 ms | 0.82 ms |
 
   The win is the long-text row — 8.7× where it used to hurt. On short texts
-  with few entities the new path is slower, about 2× at ten entities, because
-  it does per-entity bookkeeping (overlap resolution and the emitted-span
-  record) that the old string-splice did not; break-even is around a thousand
-  entities. In absolute terms that regression is single-digit microseconds
-  per call, well below the noise of a request that also runs detection.
+  with few entities the new path is slower, because it does per-entity
+  bookkeeping (overlap resolution and the emitted-span record) that the old
+  string-splice did not: about +5 µs at ten entities and +30 µs at a hundred.
+  The crossover is around a thousand entities, and from there — or on any
+  large text — the new code wins. Either way the difference is negligible
+  next to the model inference in the same request.
 - **Large merges no longer block the event loop.** Above 64 entities
   `EnsembleDetector.detect` hands overlap resolution and PERSON validation to
   a worker thread; below that the thread hop would cost more than the work.
@@ -132,16 +133,20 @@ Entity semantics are unchanged apart from the overlap fix below.
   Beispiel`), an entity **spanning a paragraph break** (the extractor joins
   paragraphs with a newline, so a detected span can match the flat text and no
   paragraph at all), and a **numeric cell** in XLSX (the extractor stringifies
-  every cell, the writer only rewrites string ones, so a flagged customer
-  number stayed put). Reconstruction now verifies the artifact instead of the
+  every cell, the generic writer only rewrites string ones, so a flagged
+  customer number stayed put — reachable by calling that writer directly, not
+  through the SDK or the pipeline, which route spreadsheets through the
+  column-aware path). Reconstruction now verifies the artifact instead of the
   plan: the bytes it produced are extracted again with the same extractor and
   must yield the masked text, otherwise the file is refused and converted to
-  text. The guarantee is now stated in one line — a reconstructed file is
-  shipped only if extracting it reproduces the masked text — and the cost of a
-  refusal is formatting, never masking. Two accepted residuals, both on that
-  side of the trade: a document whose replacement would over-reach, and one
-  whose PII lives where the writers cannot go, come back as text rather than
-  as files.
+  text. The guarantee is now stated in one line — a file rewritten by these
+  writers is shipped only if extracting it reproduces the masked text — and
+  the cost of a refusal is formatting, never masking. Two accepted residuals,
+  both on that side of the trade: a document whose replacement would
+  over-reach, and one whose PII lives where the writers cannot go, come back
+  as text rather than as files. **Follow-up:** the column-aware XLSX path
+  (`pseudonymize_xlsx_smart`) produces its own bytes and is returned
+  unverified; extending the same check to it is not in this release.
 
 ## [0.1.2] — 2026-04-27
 

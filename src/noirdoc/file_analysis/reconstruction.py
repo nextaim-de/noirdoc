@@ -9,18 +9,25 @@ Only a subset of formats support in-place reconstruction:
 Formats like PDF and images *cannot* be reconstructed; the caller should
 convert those blocks to text instead.
 
-**The guarantee.** A reconstructed file is shipped only if extracting it again
-yields the masked text — otherwise the caller converts the file to text
-instead. Replacement reaches paragraph runs and string cells; a document has
-surfaces that are neither (hyperlink runs, numeric cells), and a detected span
-can cross a paragraph break that no single paragraph contains. Reasoning about
-the map alone cannot see any of that, so the artifact is verified rather than
-the plan. The failure mode is a file that loses its formatting, never one that
-ships PII the masked text had removed.
+**The guarantee.** A file rewritten by the writers below is shipped only if
+extracting it again yields the masked text — otherwise the caller converts the
+file to text instead. Replacement reaches paragraph runs and string cells; a
+document has surfaces that are neither (hyperlink runs, numeric cells), and a
+detected span can cross a paragraph break that no single paragraph contains.
+Reasoning about the map alone cannot see any of that, so the artifact is
+verified rather than the plan. The failure mode is a file that loses its
+formatting, never one that ships PII the masked text had removed.
 
 The only accepted difference between the two is a placeholder that replaces
 nothing: a zero-length span mints one, no text replacement can place it, and
 it masks nothing.
+
+The guarantee covers what this module writes. Bytes handed in on
+``block.reconstructed_bytes`` are returned as they are — that is the
+column-aware XLSX path
+(:func:`noirdoc.file_analysis.xlsx_inference.pseudonymize_xlsx_smart`), which
+both the SDK and the pipeline use for spreadsheets and which masks whole cell
+values rather than substrings. Verifying it too is a follow-up.
 """
 
 from __future__ import annotations
@@ -323,13 +330,13 @@ def _replacements_reproduce_the_masked_text(
     """Check the map against the text the pseudonymizer actually produced.
 
     A cheap early-out on everything that goes wrong in the map itself, before
-    a file is parsed and rewritten. Replacement rewrites by text, not by
-    offset, so an original that also occurs inside an already-inserted
-    placeholder is rewritten there too — an ID "12" alongside twelve people
-    turns ``<<PERSON_12>>`` into ``<<PERSON_<<ID_1>>>>``, still masked but no
-    longer revealable — and an original can equally hit an occurrence the
-    detector never flagged ("Weber" inside "Weberstrasse"). Both show up as a
-    rebuild that no longer matches.
+    the rewrite and the re-parse that verifies it. Replacement rewrites by
+    text, not by offset, so an original that also occurs inside an
+    already-inserted placeholder is rewritten there too — an ID "12" alongside
+    twelve people turns ``<<PERSON_12>>`` into ``<<PERSON_<<ID_1>>>>``, still
+    masked but no longer revealable — and an original can equally hit an
+    occurrence the detector never flagged ("Weber" inside "Weberstrasse").
+    Both show up as a rebuild that no longer matches.
 
     It does NOT say the file will come out right: whether the writers can
     reach every place the text lives is a property of the file, checked after
