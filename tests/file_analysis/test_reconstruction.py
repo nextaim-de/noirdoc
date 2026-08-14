@@ -21,6 +21,8 @@ import random
 import re
 import string
 
+from structlog.testing import capture_logs
+
 from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.models import FileBlock
 from noirdoc.file_analysis.reconstruction import (
@@ -167,6 +169,56 @@ def test_reconstruct_xlsx_matches_the_pseudonymized_text_byte_for_byte():
     assert "Hamburg" not in _xlsx_cell(new_bytes)
 
 
+# --- The replacement map has to reproduce the masked text -----------------
+
+
+def test_replacements_refused_when_an_original_hides_in_a_placeholder():
+    """An original made of placeholder characters can corrupt a placeholder.
+
+    Replacement rewrites the file by text, so an original that also occurs
+    INSIDE an already-inserted placeholder gets rewritten there too. "12" is
+    an ID here and also the counter of `<<PERSON_12>>`, which would come out
+    as `<<PERSON_<<ID_1>>>>` — masked, but no longer revealable.
+
+    Reconstruction refuses instead: the caller falls back to converted text,
+    which keeps both the masking and the reveal and only loses the formatting.
+    """
+    people = [f"N{i:02d}" for i in range(12)]
+    text = "code 12 dann " + " ".join(people)
+    entities = [_ent("ID", "12", text.index("12"), text.index("12") + 2)]
+    for name in people:
+        start = text.index(name)
+        entities.append(_ent("PERSON", name, start, start + len(name)))
+
+    mapper = PseudonymMapper()
+    block = _block(_DOCX_MIME, _docx_bytes(text), text, entities)
+    pseudonymize_block(block, mapper)
+    assert "<<PERSON_12>>" in (block.pseudonymized_text or "")
+
+    with capture_logs() as logs:
+        assert _build_replacements(block) is None
+    assert [entry["event"] for entry in logs] == [
+        "reconstruction.replacement_collides_with_placeholder"
+    ]
+
+    assert _reconstruct_docx(block) is None
+    assert _reconstruct_xlsx(block) is None
+
+
+def test_replacements_pass_the_self_check_on_a_normal_document():
+    """The guard must not fire on ordinary text — reconstruction proceeds."""
+    mapper = PseudonymMapper()
+    block = _block(_DOCX_MIME, _docx_bytes(_MIXED), _MIXED, _mixed_entities())
+    pseudonymize_block(block, mapper)
+
+    with capture_logs() as logs:
+        replacements = _build_replacements(block)
+    assert replacements is not None
+    assert logs == []
+    assert _apply(replacements, _MIXED) == block.pseudonymized_text
+    assert _reconstruct_docx(block) is not None
+
+
 # --- No overlap: the behaviour that already worked must keep working -------
 
 _PLAIN = "Anna Weber wohnt in Berlin und schreibt an max@test.de."
@@ -201,6 +253,11 @@ def test_reconstruct_without_overlaps_is_unchanged():
 # non-whitespace characters, disjoint from the placeholder charset, so every
 # span text occurs exactly once and a replacement can be checked by substring.
 # Entity edges are snapped off whitespace, the way real detector spans are.
+#
+# That disjointness also makes this sweep blind to originals drawn from the
+# placeholder charset itself ("12" inside `<<PERSON_12>>`) — deliberately, so
+# the invariants stay decidable. `..._an_original_hides_in_a_placeholder`
+# above covers that class.
 
 _UNIQUE_ALPHABET = string.ascii_lowercase + "!#$%&()*+,-./:;=?@[]^{|}~"
 _TYPES = ("PERSON", "LOCATION", "EMAIL", "ORGANIZATION")

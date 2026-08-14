@@ -93,6 +93,15 @@ Entity semantics are unchanged apart from the overlap fix below.
   that carries entities but no record of the substitution is refused rather
   than rewritten from a guess, and the caller falls back to converted text.
 
+  Reconstruction also refuses when the replacement map cannot reproduce the
+  masked text. Replacement rewrites the file by text, so an original drawn
+  from the placeholder charset can land inside an already-inserted
+  placeholder — an ID `12` alongside twelve people would turn
+  `<<PERSON_12>>` into `<<PERSON_<<ID_1>>>>`, still masked but no longer
+  reversible. The map is checked against the pseudonymized text before it is
+  used; on a mismatch the file is converted to text instead, which keeps both
+  the masking and the reveal and loses only the formatting.
+
 ## [0.1.2] — 2026-04-27
 
 Security patch covering all High-severity findings from the 0.1.1
