@@ -178,9 +178,18 @@ class EnsembleDetector:
         the most recently accepted span per type — its "open slot" — has to be
         checked, instead of rescanning the whole accepted list (O(n²)).
 
-        Zero-length spans satisfy neither half of the overlap test. They can
-        never be replaced and never shadow the preceding span of their type, so
-        they are accepted without becoming the open slot.
+        Zero-length spans never become the open slot. Once accepted they can
+        never be overlapped: the overlap test needs a candidate that starts
+        strictly before their point, and every later candidate starts at or
+        after it. Keeping them out of the slot is what stops them shadowing the
+        real span that precedes them.
+
+        As candidates they are not inert, though. A zero-length span strictly
+        inside the open slot's span — [6, 6) against [5, 10) — does satisfy both
+        halves of the overlap test, so it goes through `_pick_winner` like any
+        other candidate and a higher score lets it replace the real span. The
+        nested loop did exactly the same, which is why the slot can end up
+        holding a zero-length span; nothing can overlap it after that.
 
         The result is identical to the pre-0.1.3 nested-loop implementation,
         entity for entity and in the same order; the two are pinned to each
@@ -192,7 +201,10 @@ class EnsembleDetector:
         )
 
         accepted: list[DetectedEntity] = []
-        # entity_type -> index in `accepted` of that type's last non-empty span
+        # entity_type -> index in `accepted` of the one span of that type a
+        # later candidate can still overlap. A zero-length candidate winning a
+        # replacement can leave a zero-length span in the slot, after which
+        # nothing matches it again.
         open_slot: dict[str, int] = {}
         for candidate in sorted_ents:
             slot = open_slot.get(candidate.entity_type)

@@ -404,17 +404,38 @@ def test_merge_char_loser_span_does_not_shield_later_entities():
     assert _merge([winner, loser, later]) == [winner, later]
 
 
-def test_merge_char_zero_length_entity_never_overlaps():
-    """A zero-length span satisfies neither half of the overlap test.
+def test_merge_char_zero_length_span_at_an_accepted_start_shadows_nothing():
+    """A zero-length span starting exactly where an accepted span starts.
 
-    It is always accepted, is never replaced, and — because it never overlaps —
-    it does not shadow the preceding same-type entity for later candidates.
+    That case fails the second half of the overlap test (`existing.start <
+    candidate.end` is `5 < 5`), so the empty span is accepted alongside — and
+    it must not shadow the span it sits on: the later candidate is still
+    resolved against `span`, not against `empty`.
+
+    This pins only the equal-start case. A zero-length candidate strictly
+    inside an accepted span behaves differently — see the test below.
     """
     span = _ent("PERSON", "Max", 5, 10, 0.90, "presidio")
     empty = _ent("PERSON", "", 5, 5, 0.80, "gliner")
     later = _ent("PERSON", "Mü", 6, 12, 0.50, "flair")
-    # `later` is resolved against `span` (index 0), not against `empty`.
     assert _merge([span, empty, later]) == [span, empty]
+
+
+def test_merge_char_zero_length_candidate_inside_a_span_can_replace_it():
+    """A zero-length candidate strictly inside an accepted span DOES overlap.
+
+    [6, 6) against [5, 10) satisfies both halves (`6 < 10` and `5 < 6`), so it
+    reaches `_pick_winner` like any other candidate — and with the higher score
+    it replaces the real span, leaving a zero-length span behind. Ugly, but it
+    is what the nested loop did, so the sweep must do it too.
+    """
+    span = _ent("PERSON", "Max", 5, 10, 0.50, "presidio")
+    empty_inside = _ent("PERSON", "", 6, 6, 0.90, "gliner")
+    assert _merge([span, empty_inside]) == [empty_inside]
+
+    # A later candidate cannot overlap the zero-length span now in the slot.
+    later = _ent("PERSON", "Mü", 7, 12, 0.10, "flair")
+    assert _merge([span, empty_inside, later]) == [empty_inside, later]
 
 
 # --- Merge off the event loop ---
