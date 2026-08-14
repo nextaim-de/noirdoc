@@ -9,6 +9,15 @@ Latency work on the masking glue: both hot loops between detection and
 substitution were superlinear, and both ran on the caller's event loop.
 Entity semantics are unchanged apart from the overlap fix below.
 
+### Added
+- **`PseudonymizationEngine.pseudonymize_detailed`** returns the pseudonymized
+  text *and* one `EmittedSpan` per placeholder written — the original text it
+  replaced, the placeholder, and its position in the output. Callers that have
+  to repeat the substitution somewhere the extracted text cannot reach (DOCX
+  runs, XLSX cells) previously re-derived that pairing from entity offsets,
+  which is a second implementation of the overlap rules. `pseudonymize()` is
+  unchanged and returns just the text.
+
 ### Changed
 - **Overlap resolution is O(n log n) instead of O(n²).**
   `EnsembleDetector._merge_entities` rescanned every already-accepted entity
@@ -51,15 +60,38 @@ Entity semantics are unchanged apart from the overlap fix below.
   phantom pseudonyms are created. Non-overlapping entities are unaffected,
   byte for byte and including the pseudonym numbering.
 
-  **Overlaps are fully masked and fully reversible.** Every character covered
-  by a detected span is replaced, whatever the overlap shape, and every
-  pseudonym maps back to exactly the text it replaced — a remainder's mapping
-  holds the slice, not the span it came from — so reidentification restores
-  the input character for character. With PERSON `[10, 20)` overlapping
-  LOCATION `[15, 25)`, the output carries the PERSON pseudonym for
-  `[10, 20)` and a LOCATION pseudonym whose original value is `text[20:25]`.
-  This supersedes the interim behaviour on this release branch, which skipped
-  the losing entity whole and left those five characters in cleartext.
+  A remainder is trimmed before it is minted: leading and trailing whitespace
+  is emitted as literal text and only the core is pseudonymized, so remainder
+  mappings are shaped like detector spans, which never carry edge whitespace.
+  A remainder that is only whitespace mints nothing.
+
+  **Overlaps are fully masked and reversible.** Every character covered by a
+  detected span is replaced, whatever the overlap shape, and every pseudonym
+  maps back to exactly the text it replaced — a remainder's mapping holds the
+  trimmed slice, not the span it came from — so reidentification restores the
+  input character for character, up to one designed mapper property that
+  predates this change and applies to every entity: `get_or_create` keys on
+  `strip().lower()`, so values differing only in case share a pseudonym and
+  reveal as the spelling minted first ("GMBH" after "GmbH" reads back as
+  "GmbH"). With PERSON `[10, 20)` overlapping LOCATION `[15, 25)`, the output
+  carries the PERSON pseudonym for `[10, 20)` and a LOCATION pseudonym whose
+  original value is `text[20:25]`. This supersedes the interim behaviour on
+  this release branch, which skipped the losing entity whole and left those
+  five characters in cleartext.
+
+- **DOCX and XLSX reconstruction dropped and mis-assigned replacements.**
+  Rewriting an Office file means replacing originals inside paragraph runs and
+  cell values, which needs the pairing of original text and placeholder.
+  `_build_replacements` re-derived it by walking the entities and accumulating
+  an offset shift for each one whose shifted start landed on a `<<`. Any
+  placeholder that arithmetic could not predict — the extra one an overlap's
+  remainder produces — threw off every later entity: the replacement was
+  dropped (the original stayed in the file) or paired with another entity's
+  placeholder (reveal would restore the wrong value). Reconstruction now
+  consumes the spans `pseudonymize_detailed` emits, applied longest original
+  first so a short original cannot eat a longer one containing it. A block
+  that carries entities but no record of the substitution is refused rather
+  than rewritten from a guess, and the caller falls back to converted text.
 
 ## [0.1.2] — 2026-04-27
 
