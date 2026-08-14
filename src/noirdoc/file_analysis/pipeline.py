@@ -157,12 +157,11 @@ async def analyze_files_in_body(
     # 6. Apply results back to the body (only modifies for pseudonymize mode)
     if not result.blocked:
         body = apply_file_results(body, stream_key, file_blocks, policy)
-        # Count conversions vs reconstructions
-        from noirdoc.file_analysis.reconstruction import can_reconstruct
-
+        # Count what actually happened, not what the format allows: a
+        # reconstructable file whose rebuild was refused went out as text.
         for block in file_blocks:
             if block.pseudonymized_text is not None:
-                if can_reconstruct(block.mime_type):
+                if block.reconstructed_bytes is not None:
                     result.files_reconstructed += 1
                 else:
                     result.files_converted += 1

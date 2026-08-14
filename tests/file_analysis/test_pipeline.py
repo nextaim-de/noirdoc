@@ -332,3 +332,63 @@ async def test_no_file_blocks_returns_unchanged():
     )
     assert result.files_analyzed == 0
     assert result_body == body
+
+
+# ── Accounting: a refused rebuild is a conversion ────────────
+
+
+def _docx_with_hyperlink_bytes() -> bytes:
+    """A DOCX whose PII sits in a hyperlink run the writer cannot reach."""
+    import io
+
+    from docx import Document
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    doc = Document()
+    para = doc.add_paragraph("Kontakt: ")
+    para._p.append(
+        parse_xml(
+            f"<w:hyperlink {nsdecls('w')}>"
+            f'<w:r><w:t xml:space="preserve">John Doe</w:t></w:r>'
+            f"</w:hyperlink>"
+        )
+    )
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+async def test_refused_reconstruction_counts_as_a_conversion():
+    """Reconstruction that refuses ships text — the accounting must say so."""
+    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "file",
+                        "file": {"file_data": _b64_uri(_docx_with_hyperlink_bytes(), docx_mime)},
+                    },
+                ],
+            },
+        ],
+    }
+    detector = _make_detector([_person_entity("John Doe", 9, 17)])
+
+    result_body, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.PSEUDONYMIZE,
+        detector=detector,
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=PseudonymMapper(),
+    )
+
+    assert result.files_reconstructed == 0
+    assert result.files_converted == 1
+
+    part = result_body["messages"][0]["content"][0]
+    assert part["type"] == "text"
+    assert part["text"] == "Kontakt: <<PERSON_1>>"

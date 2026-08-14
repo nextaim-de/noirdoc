@@ -10,8 +10,9 @@ entity is then looked up at the wrong offset.
 
 These tests pin the contract end to end: every placeholder in the
 pseudonymized text is in the replacement map under the exact original it
-replaced, and applying the map to the extracted text reproduces the
-pseudonymized text byte for byte.
+replaced, applying the map to the extracted text reproduces the pseudonymized
+text byte for byte, and — the only claim that covers what the writers can and
+cannot reach — re-extracting the file that was written reproduces it too.
 """
 
 from __future__ import annotations
@@ -63,41 +64,65 @@ def _block(mime: str, content: bytes, text: str, entities: list[DetectedEntity])
     return block
 
 
-def _docx_bytes(paragraph: str) -> bytes:
+def _docx_bytes(*paragraphs: str) -> bytes:
     from docx import Document
 
     doc = Document()
-    doc.add_paragraph(paragraph)
+    for paragraph in paragraphs:
+        doc.add_paragraph(paragraph)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _docx_with_hyperlink() -> bytes:
+    """A paragraph whose second half lives in a hyperlink run.
+
+    python-docx counts hyperlink text in `Paragraph.text` but leaves it out of
+    `Paragraph.runs`, so the extractor sees it and the writer cannot touch it.
+    """
+    from docx import Document
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    doc = Document()
+    para = doc.add_paragraph("Kontakt: ")
+    para._p.append(
+        parse_xml(
+            f"<w:hyperlink {nsdecls('w')}>"
+            f'<w:r><w:t xml:space="preserve">Anna Beispiel</w:t></w:r>'
+            f"</w:hyperlink>"
+        )
+    )
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
 def _docx_text(data: bytes) -> str:
-    from docx import Document
+    """Read the file back the way the pipeline reads it."""
+    from noirdoc.file_analysis.extractors.docx_ext import extract_docx
 
-    doc = Document(io.BytesIO(data))
-    return "\n".join(p.text for p in doc.paragraphs if p.text)
+    return extract_docx(data)
 
 
-def _xlsx_bytes(cell_value: str) -> bytes:
+def _xlsx_bytes(*cell_values: object) -> bytes:
     from openpyxl import Workbook
 
     wb = Workbook()
-    wb.active["A1"] = cell_value
+    for row, value in enumerate(cell_values, start=1):
+        wb.active[f"A{row}"] = value
     buf = io.BytesIO()
     wb.save(buf)
     wb.close()
     return buf.getvalue()
 
 
-def _xlsx_cell(data: bytes) -> str:
-    from openpyxl import load_workbook
+def _xlsx_text(data: bytes) -> str:
+    """Read the file back the way the pipeline reads it."""
+    from noirdoc.file_analysis.extractors.xlsx import extract_xlsx
 
-    wb = load_workbook(io.BytesIO(data))
-    value = wb.active["A1"].value
-    wb.close()
-    return str(value)
+    return extract_xlsx(data)
 
 
 def _apply(replacements: dict[str, str], text: str) -> str:
@@ -164,9 +189,9 @@ def test_reconstruct_xlsx_matches_the_pseudonymized_text_byte_for_byte():
 
     new_bytes = _reconstruct_xlsx(block)
     assert new_bytes is not None
-    assert _xlsx_cell(new_bytes) == block.pseudonymized_text
-    assert "GmbH" not in _xlsx_cell(new_bytes)
-    assert "Hamburg" not in _xlsx_cell(new_bytes)
+    assert _xlsx_text(new_bytes) == block.pseudonymized_text
+    assert "GmbH" not in _xlsx_text(new_bytes)
+    assert "Hamburg" not in _xlsx_text(new_bytes)
 
 
 # --- The replacement map has to reproduce the masked text -----------------
@@ -238,6 +263,160 @@ def test_replacements_pass_the_self_check_on_a_normal_document():
     assert logs == []
     assert _apply(replacements, _MIXED) == block.pseudonymized_text
     assert _reconstruct_docx(block) is not None
+
+
+# --- The file that gets shipped has to say what the masked text says ------
+#
+# The replacement map can be perfect and the write still incomplete: the
+# writers reach paragraph runs and string cells, and a document has surfaces
+# that are neither. Re-extracting the bytes that were written is the only
+# check that sees those.
+
+
+def test_docx_hyperlink_run_leak_is_refused():
+    """PII in a hyperlink run is extracted but cannot be written — refuse.
+
+    python-docx puts hyperlink text in `Paragraph.text` but not in
+    `Paragraph.runs`. The detector sees "Anna Beispiel", the map contains it,
+    and the writer — which rewrites `runs[0]` and blanks the rest — cannot
+    touch it: the shipped paragraph would read "Kontakt: <<PERSON_1>>Anna
+    Beispiel", the name masked and duplicated in cleartext beside it.
+    """
+    content = _docx_with_hyperlink()
+    text = _docx_text(content)
+    assert text == "Kontakt: Anna Beispiel"
+    start = text.index("Anna Beispiel")
+    entities = [_ent("PERSON", "Anna Beispiel", start, start + len("Anna Beispiel"))]
+
+    block = _block(_DOCX_MIME, content, text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+
+    with capture_logs() as logs:
+        result = _reconstruct_docx(block)
+    assert result is None
+    assert [entry["event"] for entry in logs] == ["reconstruction.postwrite_verification_failed"]
+
+
+def test_docx_entity_spanning_two_paragraphs_is_refused():
+    """An entity across a paragraph break matches the flat text and no paragraph.
+
+    `extract_docx` joins paragraphs with "\\n", so a detector can flag a span
+    that no single paragraph contains. The map is consistent with the flat
+    text — the pre-apply check passes — but the writer never finds the
+    original, and the organisation would ship in cleartext.
+    """
+    content = _docx_bytes("Rechnung von Muster", "GmbH & Co in Hamburg")
+    text = _docx_text(content)
+    assert text == "Rechnung von Muster\nGmbH & Co in Hamburg"
+    start = text.index("Muster")
+    entities = [_ent("ORGANIZATION", "Muster\nGmbH & Co", start, start + len("Muster\nGmbH & Co"))]
+
+    block = _block(_DOCX_MIME, content, text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+    # The map itself is fine — this is not something the pre-apply check sees.
+    assert _apply(_build_replacements(block) or {}, text) == block.pseudonymized_text
+
+    with capture_logs() as logs:
+        result = _reconstruct_docx(block)
+    assert result is None
+    assert [entry["event"] for entry in logs] == ["reconstruction.postwrite_verification_failed"]
+
+
+def test_xlsx_numeric_cell_is_refused():
+    """The XLSX writer only rewrites string cells; the extractor stringifies all.
+
+    A customer number stored as a number is extracted as "480815", detected,
+    and masked in the text — but `cell.value` is an int, the writer skips it,
+    and the number ships unchanged.
+    """
+    content = _xlsx_bytes(480815, "Anna Weber")
+    text = _xlsx_text(content)
+    assert text == "480815\nAnna Weber"
+    entities = [
+        _ent("ID", "480815", 0, 6),
+        _ent("PERSON", "Anna Weber", 7, 17),
+    ]
+
+    block = _block(_XLSX_MIME, content, text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+
+    with capture_logs() as logs:
+        result = _reconstruct_xlsx(block)
+    assert result is None
+    assert [entry["event"] for entry in logs] == ["reconstruction.postwrite_verification_failed"]
+
+
+def test_over_masking_collision_is_refused():
+    """Replacement is by text, so an unflagged occurrence would be masked too.
+
+    Only the standalone "Weber" is an entity; the "Weber" inside
+    "Weberstrasse" is not. Replacing by text would mask both, which the
+    pre-apply check catches — the document costs its formatting, never its
+    masking.
+    """
+    text = "Weber wohnt in der Weberstrasse."
+    entities = [_ent("PERSON", "Weber", 0, 5)]
+
+    block = _block(_DOCX_MIME, _docx_bytes(text), text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+
+    with capture_logs() as logs:
+        assert _build_replacements(block) is None
+    assert [entry["event"] for entry in logs] == ["reconstruction.replacement_selfcheck_failed"]
+    assert _reconstruct_docx(block) is None
+
+
+def test_multi_paragraph_document_passes_post_write_verification():
+    """The verification must not fire on an ordinary multi-paragraph document."""
+    content = _docx_bytes("Anna Weber wohnt in Berlin.", "Kontakt: max@test.de")
+    text = _docx_text(content)
+    entities = [
+        _ent("PERSON", "Anna Weber", 0, 10),
+        _ent("LOCATION", "Berlin", text.index("Berlin"), text.index("Berlin") + 6),
+        _ent(
+            "EMAIL",
+            "max@test.de",
+            text.index("max@test.de"),
+            text.index("max@test.de") + 11,
+        ),
+    ]
+
+    block = _block(_DOCX_MIME, content, text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+
+    with capture_logs() as logs:
+        new_bytes = _reconstruct_docx(block)
+    assert new_bytes is not None
+    assert logs == []
+    assert _docx_text(new_bytes) == block.pseudonymized_text
+
+
+def test_zero_length_entity_is_left_out_of_the_replacement_map():
+    """A placeholder that replaces nothing has nothing to anchor it in the file.
+
+    A zero-length span mints a pseudonym whose original is "" — masking no
+    characters at all. Feeding "" to `str.replace` would splice the pseudonym
+    between every character in the document, so it is left out of the map, and
+    the file ships without that (empty) annotation. No PII rides on it: the
+    mapping's original is the empty string.
+    """
+    text = "Anna Weber wohnt in Berlin."
+    entities = [
+        _ent("PERSON", "Anna Weber", 0, 10),
+        _ent("LOCATION", "", 20, 20),
+    ]
+
+    block = _block(_DOCX_MIME, _docx_bytes(text), text, entities)
+    pseudonymize_block(block, PseudonymMapper())
+    assert block.pseudonymized_text == "<<PERSON_1>> wohnt in <<LOCATION_1>>Berlin."
+
+    with capture_logs() as logs:
+        replacements = _build_replacements(block)
+        new_bytes = _reconstruct_docx(block)
+    assert replacements == {"Anna Weber": "<<PERSON_1>>"}
+    assert logs == []
+    assert new_bytes is not None
+    assert _docx_text(new_bytes) == "<<PERSON_1>> wohnt in Berlin."
 
 
 # --- No overlap: the behaviour that already worked must keep working -------
