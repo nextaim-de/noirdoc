@@ -8,8 +8,9 @@ round-trip preserves verbatim (and that a redacted workbook therefore leaked).
 from __future__ import annotations
 
 import datetime
+import io
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 
 from noirdoc.file_analysis.xlsx_parts import pseudonymize_workbook_parts
@@ -17,6 +18,7 @@ from noirdoc.pseudonymization.mapper import PseudonymMapper
 from tests.file_analysis.xlsx_helpers import (
     SubstringDetector,
     assert_no_part_contains,
+    inject_pivot,
     part_names,
     workbook_bytes,
 )
@@ -244,3 +246,120 @@ async def test_header_footer_parts_pseudonymized():
     assert result.entity_types == {"PERSON": 6, "EMAIL": 1}
     ws["A2"].value = "<<PERSON_1>>"
     assert_no_part_contains(workbook_bytes(wb), ["Anna Mueller", "anna@example.com"])
+
+
+# ── pivot caches ─────────────────────────────────────────
+
+_PIVOT_ROWS = [["Anna Mueller", 10], ["Ben Schulz", 20]]
+
+
+def _pivot_workbook(
+    *,
+    field_name: str = "Name",
+    shared: list[str] | None = None,
+    records: list[list[tuple[str, object]]] | None = None,
+    tables: int = 1,
+) -> Workbook:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.append([field_name, "Betrag"])
+    for row in _PIVOT_ROWS:
+        ws.append(row)
+    wb.properties.creator = "Anna Mueller"
+    wb.properties.lastModifiedBy = "Dora Klein"
+    xlsx = inject_pivot(
+        workbook_bytes(wb),
+        refreshed_by="Dora Klein",
+        fields=[
+            (field_name, ["Anna Mueller", "Ben Schulz"] if shared is None else shared),
+            ("Betrag", None),
+        ],
+        records=records if records is not None else [[("x", 0), ("n", 10)], [("x", 1), ("n", 20)]],
+        tables=tables,
+    )
+    loaded = load_workbook(io.BytesIO(xlsx))
+    assert len(loaded["Daten"]._pivots) == tables, "fixture: pivot did not load"
+    return loaded
+
+
+def _shared_values(cache: object, field_index: int = 0) -> list[object]:
+    return [item.v for item in cache.cacheFields[field_index].sharedItems._fields]  # type: ignore[attr-defined]
+
+
+async def test_pivot_cache_scrubbed_consistently_with_sheet():
+    wb = _pivot_workbook()
+    mapper = PseudonymMapper()
+    # Simulate the cell pass that ran before us: both names are already mapped.
+    anna = mapper.get_or_create("Anna Mueller", "PERSON")
+    ben = mapper.get_or_create("Ben Schulz", "PERSON")
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    cache = wb["Daten"]._pivots[0].cache
+    assert _shared_values(cache) == [anna, ben]
+    assert cache.refreshedBy == mapper.get_or_create("Dora Klein", "PERSON")
+    records = [[item.v for item in row._fields] for row in cache.records.r]
+    assert records == [[0, 10.0], [1, 20.0]]  # Index / Number items untouched
+    assert result.classifications["pivot1.Name"] == "PERSON (header)"
+    assert result.classifications["pivot1.refreshedBy"] == "PERSON (forced)"
+    # creator + lastModifiedBy + refreshedBy + 2 shared items
+    assert result.entity_types == {"PERSON": 5}
+
+    ws = wb["Daten"]
+    ws["A2"].value, ws["A3"].value = anna, ben
+    out = workbook_bytes(wb)
+    assert_no_part_contains(out, ["Anna Mueller", "Ben Schulz", "Dora Klein"])
+    reloaded = load_workbook(io.BytesIO(out))["Daten"]
+    assert len(reloaded._pivots) == 1
+    assert _shared_values(reloaded._pivots[0].cache) == [anna, ben]
+
+
+async def test_pivot_inline_record_text_scrubbed():
+    wb = _pivot_workbook(
+        shared=[], records=[[("s", "Anna Mueller"), ("n", 10)], [("s", "Ben Schulz"), ("n", 20)]]
+    )
+    mapper = PseudonymMapper()
+
+    await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    cache = wb["Daten"]._pivots[0].cache
+    first_column = [row._fields[0].v for row in cache.records.r]
+    assert first_column == [
+        mapper.get_or_create("Anna Mueller", "PERSON"),
+        mapper.get_or_create("Ben Schulz", "PERSON"),
+    ]
+    assert [row._fields[1].v for row in cache.records.r] == [10.0, 20.0]
+
+
+async def test_pivot_field_classified_by_sampling_when_header_has_no_keyword():
+    wb = _pivot_workbook(field_name="Spalte1")
+    detector = SubstringDetector({"Anna Mueller": "PERSON"})
+
+    result = await pseudonymize_workbook_parts(wb, detector, PseudonymMapper(), "de")
+
+    assert result.classifications["pivot1.Spalte1"] == "PERSON (sampled)"
+    values = _shared_values(wb["Daten"]._pivots[0].cache)
+    assert all(isinstance(v, str) and v.startswith("<<PERSON_") for v in values), values
+
+
+async def test_pivot_unclassified_field_left_alone():
+    wb = _pivot_workbook(field_name="Notiz", shared=["leave alone", "also"])
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), PseudonymMapper(), "de")
+
+    assert _shared_values(wb["Daten"]._pivots[0].cache) == ["leave alone", "also"]
+    assert "pivot1.Notiz" not in result.classifications
+
+
+async def test_shared_cache_not_double_mapped():
+    wb = _pivot_workbook(tables=2)
+    ws = wb["Daten"]
+    assert ws._pivots[0].cache is ws._pivots[1].cache, "fixture: pivots must share one cache"
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    assert not any(v.startswith("<<") for v in mapper.get_mapping_summary().values())
+    assert result.entity_types == {"PERSON": 5}
+    assert _shared_values(ws._pivots[0].cache) == ["<<PERSON_1>>", "<<PERSON_3>>"]

@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from noirdoc.file_analysis.xlsx_inference import classify_by_sample, infer_entity_type
+
 if TYPE_CHECKING:
     from openpyxl.workbook.workbook import Workbook
 
@@ -53,6 +55,7 @@ _HEADER_FOOTER_ITEMS = (
 _HEADER_FOOTER_PARTS = ("left", "center", "right")
 
 SlotKind = Literal["author", "free", "pivot"]
+FieldKey = tuple[int, int]  # (pivot cache ordinal, cacheField index)
 
 
 @dataclass
@@ -63,7 +66,8 @@ class _Slot:
     kind: SlotKind
     obj: Any  # openpyxl object holding the string
     attr: str  # attribute name on ``obj``
-    field_key: tuple[int, int] | None = None  # (cache_ordinal, field_index) for pivot items
+    field_key: FieldKey | None = None  # pivot items: which cache field the item belongs to
+    field_name: str | None = None  # pivot items: the cacheField name (= source column header)
 
     @property
     def value(self) -> str | None:
@@ -99,6 +103,7 @@ def iter_text_slots(wb: Workbook) -> Iterator[_Slot]:
     the redact consumer relies on that to apply the author-prefix rule.
     """
     from openpyxl.packaging.custom import StringProperty
+    from openpyxl.pivot.fields import Text as PivotText
 
     props = wb.properties
     for name in _CORE_AUTHOR_FIELDS:
@@ -125,6 +130,31 @@ def iter_text_slots(wb: Workbook) -> Iterator[_Slot]:
                 yield _Slot(f"comment.author@{where}", "author", comment, "author")
                 yield _Slot(f"comment.text@{where}", "free", comment, "text")
 
+    # Pivot caches. openpyxl exposes a sheet's pivot tables only via the private
+    # ``ws._pivots`` and typed cache items only via ``._fields`` — there is no public
+    # accessor. Several pivot tables can share ONE cache object (same cacheId), so
+    # dedupe by identity or the second pass would re-map the placeholders.
+    seen: set[int] = set()
+    ordinal = 0
+    for ws in wb.worksheets:
+        for pivot in ws._pivots:
+            cache = pivot.cache
+            if cache is None or id(cache) in seen:
+                continue
+            seen.add(id(cache))
+            ordinal += 1
+            yield _Slot(f"pivot{ordinal}.refreshedBy", "author", cache, "refreshedBy")
+            records = list(cache.records.r) if cache.records is not None else []
+            for index, cache_field in enumerate(cache.cacheFields):
+                key = (ordinal, index)
+                surface = f"pivot{ordinal}.{cache_field.name}"
+                shared = cache_field.sharedItems
+                shared_items = list(shared._fields) if shared is not None else []
+                inline_items = [r._fields[index] for r in records if index < len(r._fields)]
+                for item in [*shared_items, *inline_items]:
+                    if isinstance(item, PivotText):
+                        yield _Slot(surface, "pivot", item, "v", key, cache_field.name)
+
 
 def _author_entity_type(value: str) -> str:
     return "EMAIL" if "@" in value else "PERSON"
@@ -142,6 +172,41 @@ async def _detect_all(
     return await asyncio.gather(*[_one(t) for t in texts])
 
 
+async def _classify_pivot_fields(
+    slots: list[_Slot],
+    detector: DetectorLike,
+    language: str,
+    sample_size: int,
+    result: PartsResult,
+) -> dict[FieldKey, str]:
+    """Tier 1 (field name keyword) then Tier 2 (sample the first shared items) per pivot field."""
+    field_types: dict[FieldKey, str] = {}
+    samples: list[tuple[FieldKey, str]] = []
+    per_field: dict[FieldKey, int] = {}
+    surfaces: dict[FieldKey, str] = {}
+
+    for slot in slots:
+        if slot.kind != "pivot" or slot.field_key is None:
+            continue
+        key = slot.field_key
+        surfaces.setdefault(key, slot.surface)
+        if key in field_types:
+            continue
+        entity_type = infer_entity_type(slot.field_name)
+        if entity_type is not None:
+            field_types[key] = entity_type
+            result.classifications[slot.surface] = f"{entity_type} (header)"
+            continue
+        if per_field.get(key, 0) < sample_size and slot.value is not None:
+            samples.append((key, slot.value))
+            per_field[key] = per_field.get(key, 0) + 1
+
+    for key, entity_type in (await classify_by_sample(samples, detector, language)).items():
+        field_types[key] = entity_type
+        result.classifications[surfaces[key]] = f"{entity_type} (sampled)"
+    return field_types
+
+
 async def pseudonymize_workbook_parts(
     wb: Workbook,
     detector: DetectorLike,
@@ -149,6 +214,7 @@ async def pseudonymize_workbook_parts(
     language: str,
     *,
     apply: bool = True,
+    sample_size: int = 5,
 ) -> PartsResult:
     """Pseudonymize every part-level string slot of *wb* in place.
 
@@ -166,6 +232,7 @@ async def pseudonymize_workbook_parts(
     detected = dict(
         zip(free_indexes, await _detect_all(free_texts, detector, language), strict=True)
     )
+    field_types = await _classify_pivot_fields(slots, detector, language, sample_size, result)
     engine = PseudonymizationEngine()
 
     # comment object id -> (original author, entity type, placeholder or None when counting only)
@@ -186,6 +253,15 @@ async def pseudonymize_workbook_parts(
             authors[id(slot.obj)] = (value, entity_type, placeholder)
             result._add(entity_type)
             result.classifications[slot.surface] = f"{entity_type} (forced)"
+            continue
+
+        if slot.kind == "pivot":
+            field_type = field_types.get(slot.field_key) if slot.field_key else None
+            if field_type is None or mapper.reverse_lookup(value) is not None:
+                continue
+            if apply:
+                slot.set(mapper.get_or_create(value, field_type))
+            result._add(field_type)
             continue
 
         if slot.kind == "free":

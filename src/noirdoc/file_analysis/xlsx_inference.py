@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -129,6 +130,38 @@ def infer_entity_type(header_value: object) -> str | None:
     return None
 
 
+async def classify_by_sample[K: Hashable](
+    samples: Sequence[tuple[K, str]],
+    detector: DetectorLike,
+    language: str,
+    *,
+    concurrency: int = 8,
+) -> dict[K, str]:
+    """Tier 2: classify keys (columns, pivot fields, …) from sampled cell texts.
+
+    Samples are detected concurrently; for each key the first sample (in the
+    given order) that yields any entity decides, using the highest-scoring
+    entity's type. Keys without a hit are absent from the result.
+    """
+    if not samples:
+        return {}
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _detect(text: str) -> list[DetectedEntity]:
+        async with sem:
+            return await detector.detect(text, language)
+
+    results = await asyncio.gather(*[_detect(text) for _, text in samples])
+
+    classified: dict[K, str] = {}
+    for (key, _), entities in zip(samples, results, strict=True):
+        if entities and key not in classified:
+            best = max(entities, key=lambda e: e.score)
+            classified[key] = best.entity_type
+    return classified
+
+
 @dataclass
 class XlsxResult:
     """Result of smart XLSX pseudonymization."""
@@ -194,27 +227,13 @@ async def pseudonymize_xlsx_smart(
                     ):
                         sample_cells.append((cell.column, cell.value))
 
-            if sample_cells:
-                sem = asyncio.Semaphore(8)
-
-                async def _detect(text: str, sem: asyncio.Semaphore = sem) -> list[DetectedEntity]:
-                    async with sem:
-                        return await detector.detect(text, language)
-
-                det_results = await asyncio.gather(*[_detect(val) for _, val in sample_cells])
-
-                for (col_idx, _), entities in zip(sample_cells, det_results, strict=False):
-                    if entities and col_types.get(col_idx) is None:
-                        best = max(entities, key=lambda e: e.score)
-                        col_types[col_idx] = best.entity_type
-                        # Find header label for logging
-                        hcell = next((c for c in header_row if c.column == col_idx), None)
-                        label = (
-                            hcell.value
-                            if hcell and isinstance(hcell.value, str)
-                            else f"col{col_idx}"
-                        )
-                        result.column_classifications[label] = f"{best.entity_type} (sampled)"
+            sampled = await classify_by_sample(sample_cells, detector, language)
+            for col_idx, sampled_type in sampled.items():
+                col_types[col_idx] = sampled_type
+                # Find header label for logging
+                hcell = next((c for c in header_row if c.column == col_idx), None)
+                label = hcell.value if hcell and isinstance(hcell.value, str) else f"col{col_idx}"
+                result.column_classifications[label] = f"{sampled_type} (sampled)"
 
             # Mark remaining unknowns as skip
             for col in unknown_cols:
