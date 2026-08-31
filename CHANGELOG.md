@@ -5,6 +5,24 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **XLSX metadata / comment / pivot-cache leak.** XLSX redaction only rewrote
+  spreadsheet cells; the openpyxl round-trip preserved everything else
+  verbatim — `docProps/core.xml` (creator, lastModifiedBy, title, subject,
+  description, keywords, category), `docProps/custom.xml`, cell comments
+  (author and text), sheet headers/footers, and pivot caches. A pivot cache is
+  a snapshot of the source rows, so Excel kept displaying the original names in
+  the pivot after the cells had been pseudonymized. All of these now go through
+  the same mapper as cells (author-style fields are always PERSON/EMAIL,
+  free-text fields through the detector, pivot fields classified like sheet
+  columns), so `noirdoc reveal` round-trips them. Threaded comments,
+  `xl/persons` and `app.xml` Manager/Company cannot be modelled by openpyxl and
+  are dropped on write; they are counted but not reversible. Two behaviour
+  changes follow: a workbook whose only PII was metadata used to be returned
+  byte-identical and is now rewritten, and detect/block modes count document
+  metadata — block-on-PII therefore trips on virtually every Excel-authored
+  workbook, since they all carry a creator.
+
 ## [0.1.2] — 2026-04-27
 
 Security patch covering all High-severity findings from the 0.1.1

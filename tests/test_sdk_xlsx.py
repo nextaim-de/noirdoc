@@ -18,6 +18,7 @@ pytestmark = pytest.mark.slow
 
 def _build_workbook(path: Path) -> None:
     from openpyxl import Workbook
+    from openpyxl.comments import Comment
 
     wb = Workbook()
     ws = wb.active
@@ -25,6 +26,10 @@ def _build_workbook(path: Path) -> None:
     ws.append(["Name", "Email", "Notes"])
     ws.append(["Anna Müller", "anna@example.com", "leave alone"])
     ws.append(["Ben Schulz", "ben@example.com", "also untouched"])
+    # Parts outside the cell grid that a plain openpyxl round-trip would preserve verbatim.
+    wb.properties.creator = "Anna Müller"
+    wb.properties.lastModifiedBy = "Dora Klein"
+    ws["A2"].comment = Comment("Dora Klein:\nKontakt anna@example.com", "Dora Klein")
     wb.save(path)
 
 
@@ -44,7 +49,8 @@ def test_redact_file_xlsx_uses_smart_pipeline(tmp_path):
     assert result.mime_type.endswith("spreadsheetml.sheet")
     assert result.entity_count >= 4
 
-    out = load_workbook(dst)["Sheet1"]
+    out_wb = load_workbook(dst)
+    out = out_wb["Sheet1"]
     assert out.cell(2, 1).value.startswith("<<PERSON")
     assert out.cell(3, 1).value.startswith("<<PERSON")
     assert out.cell(2, 2).value.startswith("<<EMAIL")
@@ -52,6 +58,14 @@ def test_redact_file_xlsx_uses_smart_pipeline(tmp_path):
     # Non-classified column passes through untouched.
     assert out.cell(2, 3).value == "leave alone"
     assert out.cell(3, 3).value == "also untouched"
+    # Metadata and comments go through the same mapper as the cells.
+    assert out_wb.properties.creator == out.cell(2, 1).value
+    assert out_wb.properties.lastModifiedBy.startswith("<<PERSON")
+    assert out["A2"].comment.author == out_wb.properties.lastModifiedBy
+    assert (
+        out["A2"].comment.text
+        == f"{out_wb.properties.lastModifiedBy}:\nKontakt {out.cell(2, 2).value}"
+    )
 
 
 def test_reveal_file_xlsx_roundtrips(tmp_path):
@@ -68,8 +82,13 @@ def test_reveal_file_xlsx_roundtrips(tmp_path):
     revealed = r.reveal_file(dst)
 
     assert revealed is not None
-    out = load_workbook(io.BytesIO(revealed))["Sheet1"]
+    out_wb = load_workbook(io.BytesIO(revealed))
+    out = out_wb["Sheet1"]
     assert out.cell(2, 1).value == "Anna Müller"
     assert out.cell(2, 2).value == "anna@example.com"
     assert out.cell(3, 1).value == "Ben Schulz"
     assert out.cell(3, 2).value == "ben@example.com"
+    assert out_wb.properties.creator == "Anna Müller"
+    assert out_wb.properties.lastModifiedBy == "Dora Klein"
+    assert out["A2"].comment.author == "Dora Klein"
+    assert out["A2"].comment.text == "Dora Klein:\nKontakt anna@example.com"

@@ -89,6 +89,7 @@ A few honest caveats before you ship this into a pipeline:
 
 - **Best results need `[full]`.** On first use (or via `noirdoc models pull`) the full extra downloads roughly **560 MB** of weights: spaCy `de_core_news_lg`, Flair `ner-german-large`, and a GLiNER multilingual model. Budget disk and bandwidth.
 - **PDF reveal is not supported yet.** Round-tripping placeholders back into a PDF is a hard problem (position drift, font metrics, image-based redactions). PDFs redact cleanly; reveal is pass-through. DOCX, XLSX, and plain text round-trip fully.
+- **XLSX output is re-serialized by openpyxl.** Redaction covers cells, `docProps` (core + custom properties), cell comments, headers/footers and pivot caches, and reveals them all. Threaded comments, `xl/persons` and `app.xml` Manager/Company are dropped on write (counted, not reversible); shapes, slicers, macros and other parts openpyxl cannot model do not survive the round-trip. Not covered yet: hyperlink targets, data-validation lists, pivot-table captions and label filters, defined names, sheet titles.
 - **Alpha API.** Classes and CLI flags may change between `0.1.x` and `0.2.x`. Pin accordingly.
 - **Detector quality depends on the upstream models.** Presidio + Flair + GLiNER do the heavy lifting. Noirdoc adds German-specific recognizers on top, but it does not train models.
 
