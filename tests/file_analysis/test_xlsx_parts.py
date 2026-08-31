@@ -13,15 +13,24 @@ import io
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 
-from noirdoc.file_analysis.xlsx_parts import pseudonymize_workbook_parts
+from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+from noirdoc.file_analysis.xlsx_parts import (
+    count_unsupported_part_pii,
+    pseudonymize_workbook_parts,
+)
+from noirdoc.file_reidentification.service import reidentify_file_bytes
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 from tests.file_analysis.xlsx_helpers import (
     SubstringDetector,
     assert_no_part_contains,
+    inject_app_props,
     inject_pivot,
+    inject_threaded_comment_parts,
     part_names,
     workbook_bytes,
 )
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _workbook() -> Workbook:
@@ -363,3 +372,92 @@ async def test_shared_cache_not_double_mapped():
     assert not any(v.startswith("<<") for v in mapper.get_mapping_summary().values())
     assert result.entity_types == {"PERSON": 5}
     assert _shared_values(ws._pivots[0].cache) == ["<<PERSON_1>>", "<<PERSON_3>>"]
+
+
+# ── parts the writer drops (count-only) ──────────────────
+
+
+def test_count_unsupported_part_pii_reports_app_props_and_persons():
+    data = workbook_bytes(_workbook())
+    data = inject_app_props(data, manager="Dora Klein", company="Schmidt GmbH")
+    data = inject_threaded_comment_parts(data, display_name="Emil Roth", text="bitte prüfen")
+
+    result = count_unsupported_part_pii(data)
+
+    assert result.entity_types == {"PERSON": 2, "ORGANIZATION": 1}
+    assert result.classifications == {
+        "app.Manager": "PERSON (dropped)",
+        "app.Company": "ORGANIZATION (dropped)",
+        "persons.Emil Roth": "PERSON (dropped)",
+    }
+
+
+def test_count_unsupported_part_pii_ignores_blank_and_absent():
+    plain = workbook_bytes(_workbook())  # openpyxl's app.xml has no Manager/Company, no persons
+    assert count_unsupported_part_pii(plain).entity_count == 0
+
+    blank = inject_app_props(plain, manager="", company="   ")
+    assert count_unsupported_part_pii(blank).entity_count == 0
+
+
+# ── reveal ───────────────────────────────────────────────
+
+
+async def test_reveal_round_trip_restores_every_surface():
+    from openpyxl.packaging.custom import StringProperty
+
+    wb = _workbook()
+    ws = wb["Daten"]
+    wb.properties.title = "Kundenliste Anna Mueller"
+    wb.custom_doc_props.append(StringProperty(name="Mandant", value="Schmidt GmbH"))
+    ws["A2"].comment = Comment("Dora Klein:\nKontakt anna@example.com", "Dora Klein")
+    ws.oddHeader.left.text = "Erstellt von Anna Mueller"
+    data = inject_pivot(
+        workbook_bytes(wb),
+        refreshed_by="Dora Klein",
+        fields=[("Name", ["Anna Mueller", "Ben Schulz"]), ("Betrag", None)],
+        records=[[("x", 0), ("n", 10)], [("x", 1), ("n", 20)]],
+    )
+    originals = ["Anna Mueller", "Ben Schulz", "Dora Klein", "Schmidt GmbH", "anna@example.com"]
+    detector = SubstringDetector(
+        {"Anna Mueller": "PERSON", "Schmidt GmbH": "ORGANIZATION", "anna@example.com": "EMAIL"}
+    )
+    mapper = PseudonymMapper()
+
+    redacted = (await pseudonymize_xlsx_smart(data, detector, mapper, language="de")).new_bytes
+    assert redacted is not None
+    assert_no_part_contains(redacted, originals)
+
+    revealed = reidentify_file_bytes(redacted, _XLSX_MIME, mapper.get_mapping_summary())
+    assert revealed is not None
+    out = load_workbook(io.BytesIO(revealed))
+    ws = out["Daten"]
+    assert out.properties.creator == "Anna Mueller"
+    assert out.properties.lastModifiedBy == "Dora Klein"
+    assert out.properties.title == "Kundenliste Anna Mueller"
+    assert out.custom_doc_props["Mandant"].value == "Schmidt GmbH"
+    assert ws["A2"].value == "Anna Mueller"
+    assert ws["A2"].comment.author == "Dora Klein"
+    assert ws["A2"].comment.text == "Dora Klein:\nKontakt anna@example.com"
+    assert ws.oddHeader.left.text == "Erstellt von Anna Mueller"
+    cache = ws._pivots[0].cache
+    assert _shared_values(cache) == ["Anna Mueller", "Ben Schulz"]
+    assert cache.refreshedBy == "Dora Klein"
+
+
+def test_reveal_placeholder_only_in_metadata_still_rewrites():
+    """Regression: _reidentify_xlsx returned the input unchanged when no *cell* changed."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.append(["Notes"])
+    ws.append(["leave alone"])
+    wb.properties.creator = "<<PERSON_1>>"
+    wb.properties.lastModifiedBy = None
+    data = workbook_bytes(wb)
+
+    revealed = reidentify_file_bytes(data, _XLSX_MIME, {"<<PERSON_1>>": "Anna Mueller"})
+
+    assert revealed is not None
+    assert revealed != data
+    assert load_workbook(io.BytesIO(revealed)).properties.creator == "Anna Mueller"

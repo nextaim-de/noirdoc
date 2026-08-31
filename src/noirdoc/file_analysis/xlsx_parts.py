@@ -18,7 +18,9 @@ blanked), which keeps ``noirdoc reveal`` a full round-trip.
 from __future__ import annotations
 
 import asyncio
+import io
 import re
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -307,3 +309,39 @@ def reidentify_workbook_parts(
             slot.set(revealed)
             changed = True
     return changed
+
+
+_APP_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}"
+_PERSONS_NS = "{http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments}"
+_APP_FIELDS = (("Manager", "PERSON"), ("Company", "ORGANIZATION"))
+
+
+def count_unsupported_part_pii(data: bytes) -> PartsResult:
+    """Count PII in parts openpyxl cannot model and therefore DROPS on save.
+
+    ``docProps/app.xml`` (Manager, Company) is rebuilt blank and ``xl/persons/*``
+    (threaded-comment identities) is not written at all — but only when a save
+    happens at all. Counting these hits makes a workbook whose only PII lives
+    there trigger the rewrite, and keeps detect/block modes honest. Nothing is
+    mapped, so there is nothing to reveal.
+    """
+    from openpyxl.xml.functions import fromstring  # entity-safe parser openpyxl uses itself
+
+    result = PartsResult()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+        if "docProps/app.xml" in names:
+            root = fromstring(zf.read("docProps/app.xml"))
+            for tag, entity_type in _APP_FIELDS:
+                text = root.findtext(f"{_APP_NS}{tag}")
+                if isinstance(text, str) and text.strip():
+                    result._add(entity_type)
+                    result.classifications[f"app.{tag}"] = f"{entity_type} (dropped)"
+        for name in sorted(n for n in names if n.startswith("xl/persons/") and n.endswith(".xml")):
+            root = fromstring(zf.read(name))
+            for person in root.iter(f"{_PERSONS_NS}person"):
+                display_name = person.get("displayName")
+                if isinstance(display_name, str) and display_name.strip():
+                    result._add("PERSON")
+                    result.classifications[f"persons.{display_name}"] = "PERSON (dropped)"
+    return result

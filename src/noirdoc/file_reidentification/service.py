@@ -3,7 +3,8 @@
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
 * **DOCX** – python-docx paragraph runs + table cells
-* **XLSX** – openpyxl cell values
+* **XLSX** – openpyxl cell values plus docProps, comments, headers/footers and
+  pivot caches (via :mod:`noirdoc.file_analysis.xlsx_parts`)
 * **Plain text** (TXT/CSV/MD/HTML) – simple string replacement
 
 Returns ``None`` for unsupported formats (PDF, PPTX, images) so the
@@ -140,8 +141,10 @@ def _reidentify_paragraph(
 def _reidentify_xlsx(
     file_bytes: bytes, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bytes | None:
-    """Walk XLSX cells, reidentify string values."""
+    """Walk XLSX cells and part-level slots, reidentify string values."""
     from openpyxl import load_workbook
+
+    from noirdoc.file_analysis.xlsx_parts import reidentify_workbook_parts
 
     try:
         wb = load_workbook(io.BytesIO(file_bytes))
@@ -160,6 +163,11 @@ def _reidentify_xlsx(
                     if new_val != cell.value:
                         cell.value = new_val
                         changed = True
+
+    # Parts outside the cell grid (docProps, comments, headers/footers, pivot caches) — the
+    # same walker the redact side uses, so the two can never drift apart.
+    if reidentify_workbook_parts(wb, engine, mapper):
+        changed = True
 
     if not changed:
         wb.close()

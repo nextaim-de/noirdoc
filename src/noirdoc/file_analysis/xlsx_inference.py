@@ -1,12 +1,17 @@
 """Smart XLSX pseudonymization using column-type inference.
 
-Three-tier approach:
+Three-tier approach for the cell grid:
 1. **Header match** – classify columns by header keywords (instant, no NLP)
 2. **Sample detection** – run NLP on first N data rows for unclassified columns
 3. **Skip** – columns with no PII in header or sample are ignored entirely
 
 Only cells in classified columns are pseudonymized, using direct
 ``mapper.get_or_create()`` calls instead of full NLP per cell.
+
+Everything *outside* the cell grid — ``docProps`` metadata, comments,
+headers/footers, pivot caches — is handled by :mod:`noirdoc.file_analysis.xlsx_parts`
+after the sheet pass, sharing the same mapper so a name gets one placeholder
+wherever it appears.
 """
 
 from __future__ import annotations
@@ -164,12 +169,25 @@ async def classify_by_sample[K: Hashable](
 
 @dataclass
 class XlsxResult:
-    """Result of smart XLSX pseudonymization."""
+    """Result of smart XLSX pseudonymization.
+
+    ``entity_count`` / ``entity_types`` cover cells *and* part-level hits
+    (metadata, comments, headers/footers, pivot caches). They also include PII
+    in parts the writer drops rather than maps (``app.xml`` Manager/Company,
+    ``xl/persons``) — those are reported as ``"… (dropped)"`` in
+    ``column_classifications`` and are not reversible.
+    """
 
     new_bytes: bytes | None = None
     entity_count: int = 0
     entity_types: dict[str, int] = field(default_factory=dict)
     column_classifications: dict[str, str] = field(default_factory=dict)
+
+    def merge_parts(self, entity_types: dict[str, int], classifications: dict[str, str]) -> None:
+        for entity_type, count in entity_types.items():
+            self.entity_types[entity_type] = self.entity_types.get(entity_type, 0) + count
+            self.entity_count += count
+        self.column_classifications.update(classifications)
 
 
 async def pseudonymize_xlsx_smart(
@@ -252,6 +270,20 @@ async def pseudonymize_xlsx_smart(
                     cell.value = mapper.get_or_create(cell.value, entity_type)
                 result.entity_count += 1
                 result.entity_types[entity_type] = result.entity_types.get(entity_type, 0) + 1
+
+    # --- Parts outside the cell grid: docProps, comments, headers/footers, pivot caches ---
+    # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
+    from noirdoc.file_analysis.xlsx_parts import (
+        count_unsupported_part_pii,
+        pseudonymize_workbook_parts,
+    )
+
+    parts = await pseudonymize_workbook_parts(
+        wb, detector, mapper, language, apply=pseudonymize, sample_size=sample_rows
+    )
+    result.merge_parts(parts.entity_types, parts.classifications)
+    dropped = count_unsupported_part_pii(data)
+    result.merge_parts(dropped.entity_types, dropped.classifications)
 
     if pseudonymize and result.entity_count > 0:
         buf = io.BytesIO()
