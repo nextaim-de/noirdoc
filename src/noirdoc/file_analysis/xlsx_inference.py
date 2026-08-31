@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-class _Detector(Protocol):
+class DetectorLike(Protocol):
     """Minimal detector interface used here: just async ``detect``.
 
     Accepts both :class:`~noirdoc.detection.base.BaseDetector` subclasses and
@@ -33,6 +33,9 @@ class _Detector(Protocol):
     """
 
     async def detect(self, text: str, language: str = ...) -> list[DetectedEntity]: ...
+
+
+_Detector = DetectorLike
 
 
 # Header keywords → entity type (substring match on normalized header)
