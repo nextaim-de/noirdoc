@@ -41,9 +41,6 @@ class DetectorLike(Protocol):
     async def detect(self, text: str, language: str = ...) -> list[DetectedEntity]: ...
 
 
-_Detector = DetectorLike
-
-
 # Header keywords → entity type (substring match on normalized header)
 _HEADER_ENTITY_MAP: dict[str, str] = {
     # PERSON
@@ -192,7 +189,7 @@ class XlsxResult:
 
 async def pseudonymize_xlsx_smart(
     data: bytes,
-    detector: _Detector,
+    detector: DetectorLike,
     mapper: PseudonymMapper,
     language: str = "de",
     sample_rows: int = 5,
@@ -217,8 +214,20 @@ async def pseudonymize_xlsx_smart(
         logger.warning("xlsx_inference.load_failed", error=str(exc))
         return result
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+    # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
+    from noirdoc.file_analysis.xlsx_parts import (
+        clear_phantom_creator,
+        count_unsupported_part_pii,
+        pseudonymize_workbook_parts,
+    )
+
+    clear_phantom_creator(wb, data)
+    # lower-cased header -> entity type, so pivot fields built from a classified column
+    # are treated the same way as the column itself.
+    known_fields: dict[str, str] = {}
+
+    # Chartsheets have no cell grid; their headers/footers are handled with the parts.
+    for ws in wb.worksheets:
         if ws.max_row is None or ws.max_row < 2:
             continue
 
@@ -258,6 +267,11 @@ async def pseudonymize_xlsx_smart(
                 if col_types[col] is None:
                     col_types[col] = "skip"
 
+        for cell in header_row:
+            col_type = col_types.get(cell.column)
+            if isinstance(cell.value, str) and col_type and col_type != "skip":
+                known_fields.setdefault(cell.value.strip().lower(), col_type)
+
         # --- Tier 3: process all data rows for classified columns ---
         for row in ws.iter_rows(min_row=2):
             for cell in row:
@@ -272,14 +286,14 @@ async def pseudonymize_xlsx_smart(
                 result.entity_types[entity_type] = result.entity_types.get(entity_type, 0) + 1
 
     # --- Parts outside the cell grid: docProps, comments, headers/footers, pivot caches ---
-    # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
-    from noirdoc.file_analysis.xlsx_parts import (
-        count_unsupported_part_pii,
-        pseudonymize_workbook_parts,
-    )
-
     parts = await pseudonymize_workbook_parts(
-        wb, detector, mapper, language, apply=pseudonymize, sample_size=sample_rows
+        wb,
+        detector,
+        mapper,
+        language,
+        apply=pseudonymize,
+        sample_size=sample_rows,
+        known_fields=known_fields,
     )
     result.merge_parts(parts.entity_types, parts.classifications)
     dropped = count_unsupported_part_pii(data)

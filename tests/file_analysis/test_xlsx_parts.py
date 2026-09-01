@@ -186,8 +186,8 @@ async def test_comment_author_forced_and_text_detected():
     comment = ws["A2"].comment
     assert comment.author == "<<PERSON_2>>"  # same placeholder as lastModifiedBy "Dora Klein"
     assert comment.text == "Kunde <<EMAIL_1>>"
-    assert result.classifications["comment.author@Daten!A2"] == "PERSON (forced)"
-    assert result.classifications["comment.text@Daten!A2"] == "EMAIL (detected)"
+    assert result.classifications["comment.author@sheet1!A2"] == "PERSON (forced)"
+    assert result.classifications["comment.text@sheet1!A2"] == "EMAIL (detected)"
     assert result.entity_types == {"PERSON": 3, "EMAIL": 1}
 
 
@@ -250,8 +250,8 @@ async def test_header_footer_parts_pseudonymized():
     assert ws.evenFooter.left.text == "Seite &P"
     assert ws.firstHeader.center.text == "<<PERSON_1>>"
     assert ws.firstFooter.right.text == "<<PERSON_1>>"
-    assert result.classifications["header.odd.left@Daten"] == "PERSON (detected)"
-    assert result.classifications["footer.odd.center@Daten"] == "EMAIL (detected)"
+    assert result.classifications["header.odd.left@sheet1"] == "PERSON (detected)"
+    assert result.classifications["footer.odd.center@sheet1"] == "EMAIL (detected)"
     assert result.entity_types == {"PERSON": 6, "EMAIL": 1}
     ws["A2"].value = "<<PERSON_1>>"
     assert_no_part_contains(workbook_bytes(wb), ["Anna Mueller", "anna@example.com"])
@@ -268,6 +268,9 @@ def _pivot_workbook(
     shared: list[str] | None = None,
     records: list[list[tuple[str, object]]] | None = None,
     tables: int = 1,
+    captions: dict[str, str] | None = None,
+    group_items: list[str] | None = None,
+    table_sheets: list[str] | None = None,
 ) -> Workbook:
     wb = Workbook()
     ws = wb.active
@@ -275,6 +278,8 @@ def _pivot_workbook(
     ws.append([field_name, "Betrag"])
     for row in _PIVOT_ROWS:
         ws.append(row)
+    if table_sheets and "sheet2" in table_sheets:
+        wb.create_sheet("Zwei")
     wb.properties.creator = "Anna Mueller"
     wb.properties.lastModifiedBy = "Dora Klein"
     xlsx = inject_pivot(
@@ -286,9 +291,13 @@ def _pivot_workbook(
         ],
         records=records if records is not None else [[("x", 0), ("n", 10)], [("x", 1), ("n", 20)]],
         tables=tables,
+        captions=captions,
+        group_items=group_items,
+        table_sheets=table_sheets,
     )
     loaded = load_workbook(io.BytesIO(xlsx))
-    assert len(loaded["Daten"]._pivots) == tables, "fixture: pivot did not load"
+    loaded_pivots = sum(len(ws._pivots) for ws in loaded.worksheets)
+    assert loaded_pivots == tables, "fixture: pivot did not load"
     return loaded
 
 
@@ -388,7 +397,7 @@ def test_count_unsupported_part_pii_reports_app_props_and_persons():
     assert result.classifications == {
         "app.Manager": "PERSON (dropped)",
         "app.Company": "ORGANIZATION (dropped)",
-        "persons.Emil Roth": "PERSON (dropped)",
+        "persons.1": "PERSON (dropped)",
     }
 
 
@@ -461,3 +470,145 @@ def test_reveal_placeholder_only_in_metadata_still_rewrites():
     assert revealed is not None
     assert revealed != data
     assert load_workbook(io.BytesIO(revealed)).properties.creator == "Anna Mueller"
+
+
+# ── review round 1: pivot cache must agree with the cell pass ─
+
+
+async def test_pivot_value_known_to_mapper_is_replaced_even_when_field_unclassified():
+    """The sheet pass may classify a column from a row the cache sample never sees."""
+    wb = _pivot_workbook(field_name="Spalte1")
+    mapper = PseudonymMapper()
+    anna = mapper.get_or_create("Anna Mueller", "PERSON")  # the cell pass already mapped it
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    assert _shared_values(wb["Daten"]._pivots[0].cache) == [anna, "Ben Schulz"]
+    assert "pivot1.Spalte1" not in result.classifications
+    # creator + lastModifiedBy + refreshedBy + the one known shared item
+    assert result.entity_types == {"PERSON": 4}
+
+
+async def test_pivot_field_classified_from_sheet_header_map():
+    wb = _pivot_workbook(field_name="Spalte1")
+
+    result = await pseudonymize_workbook_parts(
+        wb, SubstringDetector({}), PseudonymMapper(), "de", known_fields={"spalte1": "PERSON"}
+    )
+
+    assert result.classifications["pivot1.Spalte1"] == "PERSON (sheet)"
+    values = _shared_values(wb["Daten"]._pivots[0].cache)
+    assert all(isinstance(v, str) and v.startswith("<<PERSON_") for v in values), values
+
+
+async def test_pivots_on_different_sheets_sharing_cache_id_all_scrubbed_counted_once():
+    wb = _pivot_workbook(tables=2, table_sheets=["sheet1", "sheet2"])
+    ws1, ws2 = wb["Daten"], wb["Zwei"]
+    # openpyxl hands each sheet its own CacheDefinition copy for the same cacheId, and its
+    # writer emits every copy — so every copy must be scrubbed, but counted once.
+    assert ws1._pivots[0].cache is not ws2._pivots[0].cache, "fixture: expected separate objects"
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    assert result.entity_types == {"PERSON": 5}
+    assert not any(k.startswith("pivot2.") for k in result.classifications)
+    ws1["A2"].value, ws1["A3"].value = "<<PERSON_1>>", "<<PERSON_3>>"
+    assert_no_part_contains(workbook_bytes(wb), ["Anna Mueller", "Ben Schulz", "Dora Klein"])
+
+
+async def test_pivot_captions_and_group_items_scrubbed():
+    wb = _pivot_workbook(
+        captions={"Anna Mueller": "Frau Mueller"}, group_items=["Gruppe1", "Ben Schulz"]
+    )
+    cache_field = wb["Daten"]._pivots[0].cache.cacheFields[0]
+    assert cache_field.sharedItems._fields[0].c == "Frau Mueller", "fixture: caption not loaded"
+    assert cache_field.fieldGroup.groupItems.s[1].v == "Ben Schulz", "fixture: group not loaded"
+    mapper = PseudonymMapper()
+
+    await pseudonymize_workbook_parts(wb, SubstringDetector({}), mapper, "de")
+
+    assert cache_field.sharedItems._fields[0].c == mapper.get_or_create("Frau Mueller", "PERSON")
+    assert [i.v for i in cache_field.fieldGroup.groupItems.s] == [
+        mapper.get_or_create("Gruppe1", "PERSON"),
+        mapper.get_or_create("Ben Schulz", "PERSON"),
+    ]
+    ws = wb["Daten"]
+    ws["A2"].value, ws["A3"].value = "<<PERSON_1>>", "<<PERSON_3>>"
+    assert_no_part_contains(
+        workbook_bytes(wb), ["Anna Mueller", "Ben Schulz", "Frau Mueller", "Gruppe1"]
+    )
+
+
+async def test_pivot_items_differing_only_by_whitespace_stay_distinct():
+    wb = _pivot_workbook(shared=["Anna Mueller", "Anna Mueller "])
+
+    await pseudonymize_workbook_parts(wb, SubstringDetector({}), PseudonymMapper(), "de")
+
+    assert _shared_values(wb["Daten"]._pivots[0].cache) == ["<<PERSON_1>>", "<<PERSON_1>> "]
+
+
+# ── review round 1: authors ──────────────────────────────
+
+
+async def test_comment_author_prefix_survives_partial_detector_span():
+    """A detector span covering only part of the author must not leak the rest."""
+
+    def fixture() -> Workbook:
+        wb = _workbook()
+        wb["Daten"]["A2"].comment = Comment("Klein, Dora Maria:\nbitte prüfen", "Klein, Dora Maria")
+        return wb
+
+    detector = SubstringDetector({"Klein, Dora": "PERSON"})
+    wb = fixture()
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_workbook_parts(wb, detector, mapper, "de")
+
+    author = wb["Daten"]["A2"].comment.author
+    assert author.startswith("<<PERSON_")
+    assert wb["Daten"]["A2"].comment.text == f"{author}:\nbitte prüfen"
+    # creator + lastModifiedBy + author + prefix; the partial span is not a fifth hit
+    assert result.entity_types == {"PERSON": 4}
+
+    counted = await pseudonymize_workbook_parts(
+        fixture(), detector, PseudonymMapper(), "de", apply=False
+    )
+    assert counted.entity_types == result.entity_types
+
+
+async def test_threaded_comment_guid_author_is_not_a_person():
+    """Excel's legacy mirror of a threaded comment carries author 'tc={GUID}' — not PII."""
+    wb = _workbook()
+    guid = "tc={5F7A1C2E-9B3D-4E6F-8A1B-2C3D4E5F6A7B}"
+    wb["Daten"]["A2"].comment = Comment("[Threaded comment]\n\nComment:\n    bitte prüfen", guid)
+
+    result = await pseudonymize_workbook_parts(wb, SubstringDetector({}), PseudonymMapper(), "de")
+
+    assert wb["Daten"]["A2"].comment.author == guid
+    assert result.entity_count == 2
+
+
+# ── review round 1: header/footer font codes ─────────────
+
+
+async def test_header_text_captured_by_font_code_is_scrubbed():
+    """openpyxl's greedy &"font" parse moves text between two font codes into .font."""
+    from openpyxl.worksheet.header_footer import _HeaderFooterPart
+
+    wb = _workbook()
+    ws = wb["Daten"]
+    ws.oddHeader.left = _HeaderFooterPart.from_str(
+        '&"-,Bold"Max Mustermann&"-,Regular" Vertraulich'
+    )
+    assert ws.oddHeader.left.text == " Vertraulich", "fixture: expected the greedy parse"
+    detector = SubstringDetector({"Max Mustermann": "PERSON"})
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_workbook_parts(wb, detector, mapper, "de")
+
+    placeholder = mapper.get_or_create("Max Mustermann", "PERSON")
+    assert str(ws.oddHeader.left) == f'&"-,Bold"{placeholder}&"-,Regular" Vertraulich'
+    assert result.classifications["header.odd.left@sheet1"] == "PERSON (detected)"
+    ws["A2"].value = "<<PERSON_1>>"
+    assert_no_part_contains(workbook_bytes(wb), ["Max Mustermann"])

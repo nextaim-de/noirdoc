@@ -38,6 +38,10 @@ class PseudonymMapper:
         self._pseudo_to_entity[pseudonym] = entity_text
         return pseudonym
 
+    def lookup(self, entity_text: str) -> str | None:
+        """Existing pseudonym for *entity_text* (same key as ``get_or_create``); never mints."""
+        return self._entity_to_pseudo.get(entity_text.strip().lower())
+
     def reverse_lookup(self, pseudonym: str) -> str | None:
         """Pseudonym -> Originaltext. None wenn nicht gefunden."""
         return self._pseudo_to_entity.get(pseudonym)

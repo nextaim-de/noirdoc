@@ -12,6 +12,7 @@ import io
 from openpyxl import Workbook, load_workbook
 
 from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+from noirdoc.file_reidentification.service import reidentify_file_bytes
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 from tests.file_analysis.xlsx_helpers import (
     SubstringDetector,
@@ -20,8 +21,11 @@ from tests.file_analysis.xlsx_helpers import (
     inject_pivot,
     inject_threaded_comment_parts,
     part_names,
+    strip_core_creator,
     workbook_bytes,
 )
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _sheet_bytes(
@@ -163,7 +167,7 @@ async def test_unsupported_parts_are_dropped_and_counted():
     assert result.entity_types == {"PERSON": 2, "ORGANIZATION": 1}
     assert result.column_classifications["app.Manager"] == "PERSON (dropped)"
     assert result.column_classifications["app.Company"] == "ORGANIZATION (dropped)"
-    assert result.column_classifications["persons.Emil Roth"] == "PERSON (dropped)"
+    assert result.column_classifications["persons.1"] == "PERSON (dropped)"  # never the name
     assert mapper.entity_count == 0  # dropped, not mapped — nothing to reveal
 
 
@@ -187,3 +191,74 @@ async def test_pivot_cache_matches_pseudonymized_cells():
     shared = [item.v for item in cache.cacheFields[0].sharedItems._fields]
     assert shared == [ws["A2"].value, ws["A3"].value]
     assert result.entity_types == {"PERSON": 5}  # 2 cells + refreshedBy + 2 shared items
+
+
+# ── review round 1 ───────────────────────────────────────
+
+
+async def test_pivot_cache_scrubbed_when_only_the_sheet_sample_hits():
+    """Column classified from row 2, but the cache lists that value beyond its sample window."""
+    names = ["Anna Mueller", "Ben Schulz", "Cara Weiss", "Dora Klein", "Emil Roth", "Finn Lang"]
+    data = _sheet_bytes(["Spalte1", "Betrag"], [[n, i] for i, n in enumerate(names)])
+    data = inject_pivot(
+        data,
+        refreshed_by="Gerd Haas",
+        fields=[("Spalte1", list(reversed(names))), ("Betrag", None)],
+        records=[[("x", i), ("n", i)] for i in range(len(names))],
+        source_ref="A1:B7",
+    )
+    detector = SubstringDetector({"Anna Mueller": "PERSON"})
+
+    result = await pseudonymize_xlsx_smart(data, detector, PseudonymMapper(), language="de")
+
+    assert result.column_classifications["Spalte1"] == "PERSON (sampled)"
+    assert result.column_classifications["pivot1.Spalte1"] == "PERSON (sheet)"
+    assert result.new_bytes is not None
+    assert_no_part_contains(result.new_bytes, [*names, "Gerd Haas"])
+
+
+async def test_absent_creator_element_is_not_a_phantom_person():
+    """openpyxl's reader substitutes creator='openpyxl' when the element is missing."""
+    data = strip_core_creator(_sheet_bytes(["Notes"], [["leave alone"]], creator="Anna Mueller"))
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(data, SubstringDetector({}), mapper, language="de")
+
+    assert result.entity_count == 0
+    assert result.new_bytes is None
+    assert mapper.entity_count == 0
+
+
+async def test_chartsheet_is_skipped_by_the_cell_pass_and_its_header_scrubbed():
+    from openpyxl.chart import BarChart, Reference
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.append(["Name", "Betrag"])
+    ws.append(["Anna Mueller", 10])
+    ws.append(["Ben Schulz", 20])
+    wb.properties.creator = ""
+    chartsheet = wb.create_chartsheet("Chart")
+    chart = BarChart()
+    chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=3), titles_from_data=True)
+    chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=3))
+    chartsheet.add_chart(chart)
+    chartsheet.oddHeader.left.text = "Erstellt von Anna Mueller"
+    data = workbook_bytes(wb)
+    assert "Chart" in load_workbook(io.BytesIO(data)).sheetnames, "fixture: chartsheet lost"
+    detector = SubstringDetector({"Anna Mueller": "PERSON"})
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(data, detector, mapper, language="de")
+
+    assert result.new_bytes is not None
+    out = load_workbook(io.BytesIO(result.new_bytes))
+    assert out["Daten"]["A2"].value.startswith("<<PERSON_")
+    assert out["Chart"].oddHeader.left.text == "Erstellt von <<PERSON_1>>"
+
+    revealed = reidentify_file_bytes(result.new_bytes, _XLSX_MIME, mapper.get_mapping_summary())
+    assert revealed is not None
+    back = load_workbook(io.BytesIO(revealed))
+    assert back["Daten"]["A2"].value == "Anna Mueller"
+    assert back["Chart"].oddHeader.left.text == "Erstellt von Anna Mueller"

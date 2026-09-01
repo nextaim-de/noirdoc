@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import io
+import re
 import zipfile
 
 from openpyxl import Workbook
@@ -149,30 +150,45 @@ def inject_pivot(
     sheet_part: str = "sheet1",
     tables: int = 1,
     cache_id: int = 1,
+    captions: dict[str, str] | None = None,
+    group_items: list[str] | None = None,
+    table_sheets: list[str] | None = None,
 ) -> bytes:
     """Splice one pivot cache (+ ``tables`` pivot tables sharing it) into *xlsx*.
 
     ``fields`` = ``(cacheField name, shared string items or None for numeric)``;
     ``records`` = rows of typed items. The first field is the row axis, the second
     the data field — enough for openpyxl to load and re-serialize the pivot.
+    ``captions`` adds ``c="…"`` to matching shared items; ``group_items`` adds a
+    ``fieldGroup/groupItems`` list to the first field; ``table_sheets`` places
+    table *n* on ``table_sheets[n-1]`` (default: all on ``sheet_part``).
     """
     cache_fields = []
-    for name, shared in fields:
+    for index, (name, shared) in enumerate(fields):
         if shared is None:
             items = (
                 '<sharedItems containsSemiMixedTypes="0" containsString="0" '
                 'containsNumber="1" containsInteger="1" minValue="0" maxValue="0"/>'
             )
         elif shared:
-            items = (
-                f'<sharedItems count="{len(shared)}">'
-                + "".join(f'<s v="{html.escape(s, quote=True)}"/>' for s in shared)
-                + "</sharedItems>"
-            )
+            entries = []
+            for s in shared:
+                caption = captions.get(s) if captions else None
+                cap = f' c="{html.escape(caption, quote=True)}"' if caption else ""
+                entries.append(f'<s v="{html.escape(s, quote=True)}"{cap}/>')
+            items = f'<sharedItems count="{len(shared)}">' + "".join(entries) + "</sharedItems>"
         else:
             items = "<sharedItems/>"
+        group = ""
+        if index == 0 and group_items:
+            group = (
+                f'<fieldGroup base="0"><groupItems count="{len(group_items)}">'
+                + "".join(f'<s v="{html.escape(g, quote=True)}"/>' for g in group_items)
+                + "</groupItems></fieldGroup>"
+            )
         cache_fields.append(
-            f'<cacheField name="{html.escape(name, quote=True)}" numFmtId="0">{items}</cacheField>'
+            f'<cacheField name="{html.escape(name, quote=True)}" numFmtId="0">'
+            f"{items}{group}</cacheField>"
         )
 
     def _item(kind: str, value: object) -> str:
@@ -243,17 +259,22 @@ def inject_pivot(
         (f"/xl/pivotCache/pivotCacheDefinition{cache_id}.xml", f"{_CT}.pivotCacheDefinition+xml"),
         (f"/xl/pivotCache/pivotCacheRecords{cache_id}.xml", f"{_CT}.pivotCacheRecords+xml"),
     ]
-    sheet_rels = _relationships(xlsx, f"xl/worksheets/_rels/{sheet_part}.xml.rels")
-    for n in range(1, tables + 1):
+    sheets = table_sheets or [sheet_part] * tables
+    rels_by_sheet: dict[str, bytes] = {}
+    for n, part in enumerate(sheets, start=1):
         edits[f"xl/pivotTables/pivotTable{n}.xml"] = _table(n).encode()
         edits[f"xl/pivotTables/_rels/pivotTable{n}.xml.rels"] = table_rels.encode()
         overrides.append((f"/xl/pivotTables/pivotTable{n}.xml", f"{_CT}.pivotTable+xml"))
-        sheet_rels = _append_before(
-            sheet_rels,
+        rels = rels_by_sheet.get(part) or _relationships(
+            xlsx, f"xl/worksheets/_rels/{part}.xml.rels"
+        )
+        rels_by_sheet[part] = _append_before(
+            rels,
             b"</Relationships>",
             f'<Relationship Id="rIdPT{n}" Type="{_REL}/pivotTable" Target="../pivotTables/pivotTable{n}.xml"/>',
         )
-    edits[f"xl/worksheets/_rels/{sheet_part}.xml.rels"] = sheet_rels
+    for part, rels in rels_by_sheet.items():
+        edits[f"xl/worksheets/_rels/{part}.xml.rels"] = rels
 
     workbook_xml = _append_before(
         read_part(xlsx, "xl/workbook.xml"),
@@ -300,6 +321,14 @@ def inject_threaded_comment_parts(xlsx: bytes, *, display_name: str, text: str) 
             ),
         ],
     )
+
+
+def strip_core_creator(xlsx: bytes) -> bytes:
+    """Remove the ``<dc:creator>`` element from ``docProps/core.xml`` (foreign producers omit it)."""
+    core = read_part(xlsx, "docProps/core.xml")
+    stripped = re.sub(rb"<dc:creator\b[^>]*>.*?</dc:creator>", b"", core, flags=re.DOTALL)
+    assert stripped != core, "fixture: core.xml had no dc:creator to strip"
+    return rewrite_zip(xlsx, {"docProps/core.xml": stripped})
 
 
 def inject_app_props(xlsx: bytes, *, manager: str, company: str) -> bytes:

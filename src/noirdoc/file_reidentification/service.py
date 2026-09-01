@@ -154,8 +154,7 @@ def _reidentify_xlsx(
 
     changed = False
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+    for ws in wb.worksheets:  # chartsheets have no cells; their headers are parts
         for row in ws.iter_rows():
             for cell in row:
                 if isinstance(cell.value, str) and _PSEUDO_PATTERN.search(cell.value):
