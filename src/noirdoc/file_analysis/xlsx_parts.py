@@ -51,7 +51,15 @@ _THREADED_MIRROR_AUTHOR = re.compile(r"^tc=\{[0-9A-Fa-f-]{36}\}$")
 # core.xml fields that are a person (or account) by definition — never rely on NER for them.
 _CORE_AUTHOR_FIELDS = ("creator", "lastModifiedBy")
 # core.xml free-text fields — run through the detector like body text.
-_CORE_FREE_FIELDS = ("title", "subject", "description", "keywords", "category")
+_CORE_FREE_FIELDS = (
+    "title",
+    "subject",
+    "description",
+    "keywords",
+    "category",
+    "contentStatus",
+    "identifier",
+)
 # (attribute on ws.HeaderFooter, surface label)
 _HEADER_FOOTER_ITEMS = (
     ("oddHeader", "header.odd"),
@@ -311,11 +319,19 @@ async def pseudonymize_workbook_parts(
     result = PartsResult()
     slots = [s for s in iter_text_slots(wb) if s.value is not None]
 
+    # Detect each distinct free text once — thousands of identical "ok" comments are common.
     free_indexes = [i for i, s in enumerate(slots) if s.kind == "free"]
-    free_texts = [t for i in free_indexes if (t := slots[i].value) is not None]
-    detected = dict(
-        zip(free_indexes, await _detect_all(free_texts, detector, language), strict=True)
-    )
+    unique_texts: dict[str, int] = {}
+    for i in free_indexes:
+        text = slots[i].value
+        if text is not None and text not in unique_texts:
+            unique_texts[text] = len(unique_texts)
+    unique_results = await _detect_all(list(unique_texts), detector, language)
+    detected = {
+        i: unique_results[unique_texts[text]]
+        for i in free_indexes
+        if (text := slots[i].value) is not None
+    }
     field_types = await _classify_pivot_fields(
         slots, detector, language, sample_size, known_fields or {}, result
     )
@@ -451,11 +467,20 @@ def count_unsupported_part_pii(data: bytes) -> PartsResult:
     """
     from openpyxl.xml.functions import fromstring  # entity-safe parser openpyxl uses itself
 
+    def _parse(zf: zipfile.ZipFile, name: str) -> Any:
+        # These parts are dropped on write whatever they contain, so a corrupt one must
+        # not fail a request that would otherwise redact fine.
+        try:
+            return fromstring(zf.read(name))
+        except Exception as exc:
+            logger.warning("xlsx_parts.part_unreadable", part=name, error=str(exc))
+            return None
+
     result = PartsResult()
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         names = set(zf.namelist())
-        if "docProps/app.xml" in names:
-            root = fromstring(zf.read("docProps/app.xml"))
+        root = _parse(zf, "docProps/app.xml") if "docProps/app.xml" in names else None
+        if root is not None:
             for tag, entity_type in _APP_FIELDS:
                 text = root.findtext(f"{_APP_NS}{tag}")
                 if isinstance(text, str) and text.strip():
@@ -463,7 +488,9 @@ def count_unsupported_part_pii(data: bytes) -> PartsResult:
                     result.classifications[f"app.{tag}"] = f"{entity_type} (dropped)"
         person_ordinal = 0
         for name in sorted(n for n in names if n.startswith("xl/persons/") and n.endswith(".xml")):
-            root = fromstring(zf.read(name))
+            root = _parse(zf, name)
+            if root is None:
+                continue
             for person in root.iter(f"{_PERSONS_NS}person"):
                 display_name = person.get("displayName")
                 if isinstance(display_name, str) and display_name.strip():

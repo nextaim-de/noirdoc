@@ -13,9 +13,11 @@ import io
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 
+from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
 from noirdoc.file_analysis.xlsx_parts import (
     count_unsupported_part_pii,
+    iter_text_slots,
     pseudonymize_workbook_parts,
 )
 from noirdoc.file_reidentification.service import reidentify_file_bytes
@@ -27,6 +29,7 @@ from tests.file_analysis.xlsx_helpers import (
     inject_pivot,
     inject_threaded_comment_parts,
     part_names,
+    rewrite_zip,
     workbook_bytes,
 )
 
@@ -612,3 +615,59 @@ async def test_header_text_captured_by_font_code_is_scrubbed():
     assert result.classifications["header.odd.left@sheet1"] == "PERSON (detected)"
     ws["A2"].value = "<<PERSON_1>>"
     assert_no_part_contains(workbook_bytes(wb), ["Max Mustermann"])
+
+
+# ── review round 1: robustness ───────────────────────────
+
+
+def test_count_unsupported_part_pii_tolerates_corrupt_parts():
+    """openpyxl never reads these parts and drops them on write — a corrupt one must not
+    fail a request that redacted fine before."""
+    data = workbook_bytes(_workbook())
+    data = inject_threaded_comment_parts(data, display_name="Emil Roth", text="x")
+    data = rewrite_zip(data, {"docProps/app.xml": b"", "xl/persons/person.xml": b"<personList"})
+
+    result = count_unsupported_part_pii(data)
+
+    assert result.entity_count == 0
+
+
+async def test_identical_free_texts_are_detected_once():
+    calls: list[str] = []
+
+    class CountingDetector(SubstringDetector):
+        async def detect(self, text: str, language: str = "de") -> list[DetectedEntity]:
+            calls.append(text)
+            return await super().detect(text, language)
+
+    wb = _workbook()
+    ws = wb["Daten"]
+    for ref in ("A2", "B2", "A3"):
+        ws[ref].comment = Comment("bitte prüfen", "Dora Klein")
+
+    await pseudonymize_workbook_parts(wb, CountingDetector({}), PseudonymMapper(), "de")
+
+    assert calls.count("bitte prüfen") == 1
+
+
+async def test_core_content_status_and_identifier_scrubbed():
+    wb = _workbook()
+    wb.properties.contentStatus = "Freigegeben von Anna Mueller"
+    wb.properties.identifier = "Akte Anna Mueller"
+    detector = SubstringDetector({"Anna Mueller": "PERSON"})
+
+    await pseudonymize_workbook_parts(wb, detector, PseudonymMapper(), "de")
+
+    assert wb.properties.contentStatus == "Freigegeben von <<PERSON_1>>"
+    assert wb.properties.identifier == "Akte <<PERSON_1>>"
+
+
+def test_walker_does_not_materialize_the_grid():
+    wb = _workbook()
+    ws = wb["Daten"]
+    ws["Z100"] = "far away"
+    before = len(ws._cells)
+
+    list(iter_text_slots(wb))
+
+    assert len(ws._cells) == before

@@ -21,7 +21,16 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   changes follow: a workbook whose only PII was metadata used to be returned
   byte-identical and is now rewritten, and detect/block modes count document
   metadata — block-on-PII therefore trips on virtually every Excel-authored
-  workbook, since they all carry a creator.
+  workbook, since they all carry a creator. A workbook without a `dc:creator`
+  element is *not* reported with openpyxl's default `"openpyxl"` creator, and
+  Excel's synthetic `tc={GUID}` author on threaded-comment mirrors is skipped.
+  Classification keys never contain file-provided names (they are logged).
+
+### Fixed
+- **XLSX chart sheets.** A workbook containing a chart sheet crashed both
+  redact and reveal (`AttributeError: 'Chartsheet' object has no attribute
+  'max_row'`); chart sheets are now skipped by the cell pass and their
+  headers/footers scrubbed like worksheet headers.
 
 ## [0.1.2] — 2026-04-27
 
