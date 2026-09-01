@@ -1,7 +1,7 @@
 # Releasing noirdoc
 
 How to cut a release. For background on why it's set up this way, see the
-[release plan](https://github.com/nextaim-de/noirdoc/blob/main/.github/workflows/release.yml).
+[release workflow](https://github.com/noirdoc-ai/mask-engine/blob/main/.github/workflows/release.yml).
 
 ## Summary
 
@@ -20,14 +20,16 @@ On **PyPI** → https://pypi.org/manage/account/publishing/ → *Add a pending p
 | Field               | Value        |
 |---------------------|--------------|
 | PyPI project name   | `noirdoc`    |
-| Owner               | `nextaim-de` |
-| Repository          | `noirdoc`    |
+| Owner               | `noirdoc-ai`  |
+| Repository          | `mask-engine` |
 | Workflow filename   | `release.yml`|
 | Environment         | `pypi`       |
 
 Repeat on **TestPyPI** → https://test.pypi.org/manage/account/publishing/ with environment `testpypi`.
 
 A "pending" publisher reserves the name on each index before the first upload. The first successful publish promotes it to a regular publisher.
+
+The publisher must match the repository that runs the workflow **exactly** (owner, repo, workflow file, environment). After the move from `nextaim-de/noirdoc` to `noirdoc-ai/mask-engine` the publish step failed with `invalid-publisher` until the entries on both indexes were re-registered with the new owner/repo — the failing run prints the claims it presented, which are the values to enter.
 
 ### 2. Create GitHub environments
 
