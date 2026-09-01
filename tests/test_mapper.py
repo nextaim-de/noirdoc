@@ -37,6 +37,14 @@ def test_reverse_lookup():
     assert mapper.reverse_lookup("<<UNKNOWN_1>>") is None
 
 
+def test_lookup_returns_existing_pseudonym_without_minting():
+    mapper = PseudonymMapper()
+    mapper.get_or_create("Max Müller", "PERSON")
+    assert mapper.lookup("max müller ") == "<<PERSON_1>>"
+    assert mapper.lookup("Lisa Schmidt") is None
+    assert mapper.entity_count == 1
+
+
 def test_mapping_summary():
     mapper = PseudonymMapper()
     mapper.get_or_create("Max Müller", "PERSON")

@@ -1,18 +1,24 @@
 """Smart XLSX pseudonymization using column-type inference.
 
-Three-tier approach:
+Three-tier approach for the cell grid:
 1. **Header match** – classify columns by header keywords (instant, no NLP)
 2. **Sample detection** – run NLP on first N data rows for unclassified columns
 3. **Skip** – columns with no PII in header or sample are ignored entirely
 
 Only cells in classified columns are pseudonymized, using direct
 ``mapper.get_or_create()`` calls instead of full NLP per cell.
+
+Everything *outside* the cell grid — ``docProps`` metadata, comments,
+headers/footers, pivot caches — is handled by :mod:`noirdoc.file_analysis.xlsx_parts`
+after the sheet pass, sharing the same mapper so a name gets one placeholder
+wherever it appears.
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -25,7 +31,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-class _Detector(Protocol):
+class DetectorLike(Protocol):
     """Minimal detector interface used here: just async ``detect``.
 
     Accepts both :class:`~noirdoc.detection.base.BaseDetector` subclasses and
@@ -126,19 +132,64 @@ def infer_entity_type(header_value: object) -> str | None:
     return None
 
 
+async def classify_by_sample[K: Hashable](
+    samples: Sequence[tuple[K, str]],
+    detector: DetectorLike,
+    language: str,
+    *,
+    concurrency: int = 8,
+) -> dict[K, str]:
+    """Tier 2: classify keys (columns, pivot fields, …) from sampled cell texts.
+
+    Samples are detected concurrently; for each key the first sample (in the
+    given order) that yields any entity decides, using the highest-scoring
+    entity's type. Keys without a hit are absent from the result.
+    """
+    if not samples:
+        return {}
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _detect(text: str) -> list[DetectedEntity]:
+        async with sem:
+            return await detector.detect(text, language)
+
+    results = await asyncio.gather(*[_detect(text) for _, text in samples])
+
+    classified: dict[K, str] = {}
+    for (key, _), entities in zip(samples, results, strict=True):
+        if entities and key not in classified:
+            best = max(entities, key=lambda e: e.score)
+            classified[key] = best.entity_type
+    return classified
+
+
 @dataclass
 class XlsxResult:
-    """Result of smart XLSX pseudonymization."""
+    """Result of smart XLSX pseudonymization.
+
+    ``entity_count`` / ``entity_types`` cover cells *and* part-level hits
+    (metadata, comments, headers/footers, pivot caches). They also include PII
+    in parts the writer drops rather than maps (``app.xml`` Manager/Company,
+    ``xl/persons``) — those are reported as ``"… (dropped)"`` in
+    ``column_classifications`` and are not reversible.
+    """
 
     new_bytes: bytes | None = None
     entity_count: int = 0
     entity_types: dict[str, int] = field(default_factory=dict)
     column_classifications: dict[str, str] = field(default_factory=dict)
 
+    def merge_parts(self, entity_types: dict[str, int], classifications: dict[str, str]) -> None:
+        for entity_type, count in entity_types.items():
+            self.entity_types[entity_type] = self.entity_types.get(entity_type, 0) + count
+            self.entity_count += count
+        self.column_classifications.update(classifications)
+
 
 async def pseudonymize_xlsx_smart(
     data: bytes,
-    detector: _Detector,
+    detector: DetectorLike,
     mapper: PseudonymMapper,
     language: str = "de",
     sample_rows: int = 5,
@@ -163,8 +214,20 @@ async def pseudonymize_xlsx_smart(
         logger.warning("xlsx_inference.load_failed", error=str(exc))
         return result
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+    # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
+    from noirdoc.file_analysis.xlsx_parts import (
+        clear_phantom_creator,
+        count_unsupported_part_pii,
+        pseudonymize_workbook_parts,
+    )
+
+    clear_phantom_creator(wb, data)
+    # lower-cased header -> entity type, so pivot fields built from a classified column
+    # are treated the same way as the column itself.
+    known_fields: dict[str, str] = {}
+
+    # Chartsheets have no cell grid; their headers/footers are handled with the parts.
+    for ws in wb.worksheets:
         if ws.max_row is None or ws.max_row < 2:
             continue
 
@@ -191,32 +254,23 @@ async def pseudonymize_xlsx_smart(
                     ):
                         sample_cells.append((cell.column, cell.value))
 
-            if sample_cells:
-                sem = asyncio.Semaphore(8)
-
-                async def _detect(text: str, sem: asyncio.Semaphore = sem) -> list[DetectedEntity]:
-                    async with sem:
-                        return await detector.detect(text, language)
-
-                det_results = await asyncio.gather(*[_detect(val) for _, val in sample_cells])
-
-                for (col_idx, _), entities in zip(sample_cells, det_results, strict=False):
-                    if entities and col_types.get(col_idx) is None:
-                        best = max(entities, key=lambda e: e.score)
-                        col_types[col_idx] = best.entity_type
-                        # Find header label for logging
-                        hcell = next((c for c in header_row if c.column == col_idx), None)
-                        label = (
-                            hcell.value
-                            if hcell and isinstance(hcell.value, str)
-                            else f"col{col_idx}"
-                        )
-                        result.column_classifications[label] = f"{best.entity_type} (sampled)"
+            sampled = await classify_by_sample(sample_cells, detector, language)
+            for col_idx, sampled_type in sampled.items():
+                col_types[col_idx] = sampled_type
+                # Find header label for logging
+                hcell = next((c for c in header_row if c.column == col_idx), None)
+                label = hcell.value if hcell and isinstance(hcell.value, str) else f"col{col_idx}"
+                result.column_classifications[label] = f"{sampled_type} (sampled)"
 
             # Mark remaining unknowns as skip
             for col in unknown_cols:
                 if col_types[col] is None:
                     col_types[col] = "skip"
+
+        for cell in header_row:
+            col_type = col_types.get(cell.column)
+            if isinstance(cell.value, str) and col_type and col_type != "skip":
+                known_fields.setdefault(cell.value.strip().lower(), col_type)
 
         # --- Tier 3: process all data rows for classified columns ---
         for row in ws.iter_rows(min_row=2):
@@ -230,6 +284,20 @@ async def pseudonymize_xlsx_smart(
                     cell.value = mapper.get_or_create(cell.value, entity_type)
                 result.entity_count += 1
                 result.entity_types[entity_type] = result.entity_types.get(entity_type, 0) + 1
+
+    # --- Parts outside the cell grid: docProps, comments, headers/footers, pivot caches ---
+    parts = await pseudonymize_workbook_parts(
+        wb,
+        detector,
+        mapper,
+        language,
+        apply=pseudonymize,
+        sample_size=sample_rows,
+        known_fields=known_fields,
+    )
+    result.merge_parts(parts.entity_types, parts.classifications)
+    dropped = count_unsupported_part_pii(data)
+    result.merge_parts(dropped.entity_types, dropped.classifications)
 
     if pseudonymize and result.entity_count > 0:
         buf = io.BytesIO()
