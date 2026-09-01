@@ -5,6 +5,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-09-01
+
+Security patch: XLSX redaction now covers everything outside the cell grid —
+document properties, comments, headers/footers and pivot caches — reversibly,
+and no longer crashes on chart sheets. Recommended upgrade for anyone
+redacting spreadsheets.
+
 ### Security
 - **XLSX metadata / comment / pivot-cache leak.** XLSX redaction only rewrote
   spreadsheet cells; the openpyxl round-trip preserved everything else
@@ -155,7 +162,8 @@ First public alpha on PyPI.
   a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
   loudly when the `[full]` extra isn't installed.
 
-[Unreleased]: https://github.com/nextaim-de/noirdoc/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/noirdoc-ai/mask-engine/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.3
 [0.1.2]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.0
