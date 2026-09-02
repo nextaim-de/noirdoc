@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
+    from docx.text.run import Run
 
     from noirdoc.file_analysis.models import FileBlock
 
@@ -135,21 +136,62 @@ def _reconstruct_docx(block: FileBlock) -> bytes | None:
 
 
 def _replace_in_paragraph(para: Paragraph, replacements: dict[str, str]) -> None:
-    """Replace entity text across runs in a paragraph."""
-    full_text = para.text
-    for original, pseudo in replacements.items():
-        if original in full_text:
-            full_text = full_text.replace(original, pseudo)
+    """Replace entity text in a paragraph, hyperlink-aware.
 
-    if full_text == para.text:
+    ``para.text`` concatenates hyperlink text but ``para.runs`` excludes
+    hyperlink runs, so a whole-paragraph rewrite through ``para.runs``
+    leaks entities inside hyperlinks and duplicates hyperlink text into
+    ordinary runs.  Instead, walk ``iter_inner_content()`` and rewrite
+    each segment separately: maximal groups of consecutive plain runs,
+    and each hyperlink's own runs (which stay inside the hyperlink).
+    """
+    for runs in paragraph_run_segments(para):
+        _replace_in_runs(runs, replacements)
+
+
+def paragraph_run_segments(para: Paragraph) -> list[list[Run]]:
+    """Split a paragraph into rewritable run groups.
+
+    Consecutive plain runs form one segment (an entity may span several
+    of them); each hyperlink contributes its own runs as a separate
+    segment so its text is never mixed into surrounding runs.
+    """
+    from docx.text.hyperlink import Hyperlink
+
+    segments: list[list[Run]] = []
+    plain: list[Run] = []
+    for item in para.iter_inner_content():
+        if isinstance(item, Hyperlink):
+            if plain:
+                segments.append(plain)
+                plain = []
+            segments.append(list(item.runs))
+        else:
+            plain.append(item)
+    if plain:
+        segments.append(plain)
+    return segments
+
+
+def _replace_in_runs(runs: list[Run], replacements: dict[str, str]) -> None:
+    """Apply *replacements* to the concatenated text of *runs*, in place."""
+    if not runs:
+        return
+
+    full_text = "".join(run.text for run in runs)
+    new_text = full_text
+    for original, pseudo in replacements.items():
+        if original in new_text:
+            new_text = new_text.replace(original, pseudo)
+
+    if new_text == full_text:
         return
 
     # Re-write runs: clear all but first, set first to full text.
     # This simplifies formatting but is acceptable for v1.
-    if para.runs:
-        para.runs[0].text = full_text
-        for run in para.runs[1:]:
-            run.text = ""
+    runs[0].text = new_text
+    for run in runs[1:]:
+        run.text = ""
 
 
 # ---------------------------------------------------------------------------
