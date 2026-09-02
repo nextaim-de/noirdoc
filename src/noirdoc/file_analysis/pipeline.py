@@ -86,8 +86,11 @@ async def analyze_files_in_body(
                 mapper,
                 language,
                 pseudonymize=policy.should_pseudonymize(),
+                # Block mode: the first hit settles the decision — no full count needed.
+                stop_on_first_hit=policy.should_block_on_pii(),
             )
             result.total_entities += xlsx_result.entity_count
+            result.free_texts_skipped += xlsx_result.free_texts_skipped
             for etype, count in xlsx_result.entity_types.items():
                 result.entity_types[etype] = result.entity_types.get(etype, 0) + count
 
@@ -105,6 +108,7 @@ async def analyze_files_in_body(
                 mode=mode.value,
                 entity_count=xlsx_result.entity_count,
                 columns=xlsx_result.column_classifications,
+                free_texts_skipped=xlsx_result.free_texts_skipped,
             )
             continue
 
