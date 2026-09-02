@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
-from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+from noirdoc.file_analysis.xlsx_inference import XlsxLoadError, pseudonymize_xlsx_smart
 from noirdoc.file_reidentification.service import reidentify_file_bytes
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 from tests.file_analysis.xlsx_helpers import (
@@ -21,6 +22,8 @@ from tests.file_analysis.xlsx_helpers import (
     inject_pivot,
     inject_threaded_comment_parts,
     part_names,
+    read_part,
+    rewrite_zip,
     strip_core_creator,
     workbook_bytes,
 )
@@ -191,6 +194,38 @@ async def test_pivot_cache_matches_pseudonymized_cells():
     shared = [item.v for item in cache.cacheFields[0].sharedItems._fields]
     assert shared == [ws["A2"].value, ws["A3"].value]
     assert result.entity_types == {"PERSON": 5}  # 2 cells + refreshedBy + 2 shared items
+
+
+# ── fail closed on load failures (issue #13) ─────────────
+
+
+async def test_pivot_discrete_pr_load_failure_raises_instead_of_failing_open():
+    """openpyxl 3.1.5 crashes on ``cacheField/fieldGroup/discretePr`` (manually grouped
+    pivot fields). The old code swallowed that and returned an empty result, which the
+    callers turned into 'the original workbook is the redacted output'."""
+    data = _sheet_bytes(["Name", "Betrag"], [["Anna Mueller", 10], ["Ben Schulz", 20]])
+    data = inject_pivot(
+        data,
+        refreshed_by="Dora Klein",
+        fields=[("Name", ["Anna Mueller", "Ben Schulz"]), ("Betrag", None)],
+        records=[[("x", 0), ("n", 10)], [("x", 1), ("n", 20)]],
+        group_items=["Gruppe A", "Gruppe B"],
+    )
+    part = "xl/pivotCache/pivotCacheDefinition1.xml"
+    xml = read_part(data, part)
+    assert b"<groupItems" in xml, "fixture: pivot cache has no fieldGroup to poison"
+    xml = xml.replace(
+        b"<groupItems",
+        b'<discretePr count="2"><x v="0"/><x v="1"/></discretePr><groupItems',
+        1,
+    )
+    data = rewrite_zip(data, {part: xml})
+    mapper = PseudonymMapper()
+
+    with pytest.raises(XlsxLoadError, match="cannot load xlsx workbook"):
+        await pseudonymize_xlsx_smart(data, SubstringDetector({}), mapper, language="de")
+
+    assert mapper.entity_count == 0
 
 
 # ── review round 1 ───────────────────────────────────────
