@@ -3,8 +3,10 @@
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
 * **DOCX** – python-docx paragraph runs + table cells
-* **XLSX** – openpyxl cell values plus docProps, comments, headers/footers and
-  pivot caches (via :mod:`noirdoc.file_analysis.xlsx_parts`)
+* **XLSX** – openpyxl cell values plus every part-level surface enumerated by
+  :mod:`noirdoc.file_analysis.xlsx_parts` (docProps, comments, headers/footers,
+  pivot caches and table captions, chart caches/titles, hyperlinks, filter and
+  validation criteria)
 * **Plain text** (TXT/CSV/MD/HTML) – simple string replacement
 
 Returns ``None`` for unsupported formats (PDF, PPTX, images) so the
