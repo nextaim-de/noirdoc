@@ -236,6 +236,102 @@ async def test_pseudonymize_pdf_converts_to_text():
     assert result.files_extraction_errors == 1
 
 
+# ── DOCX package parts ───────────────────────────────────────
+
+
+def _docx_with_author(author: str) -> bytes:
+    import io
+
+    from docx import Document
+
+    from tests.file_analysis.docx_helpers import strip_template_noise
+
+    doc = Document()
+    doc.add_paragraph("Kein Inhalt")
+    doc.core_properties.author = author
+    buf = io.BytesIO()
+    doc.save(buf)
+    return strip_template_noise(buf.getvalue())
+
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+async def test_pseudonymize_docx_metadata_only_pii_still_rewrites_file():
+    """A DOCX whose only PII is in docProps must not be forwarded verbatim."""
+    import io
+
+    from docx import Document
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "file",
+                        "file": {
+                            "file_data": _b64_uri(_docx_with_author("Anna Mueller"), _DOCX_MIME)
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    detector = _make_detector([])  # nothing in the body text
+    mapper = PseudonymMapper()
+
+    result_body, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.PSEUDONYMIZE,
+        detector=detector,
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=mapper,
+    )
+    assert result.total_entities == 1
+    assert result.entity_types == {"PERSON": 1}
+    assert result.files_reconstructed == 1
+
+    new_b64 = result_body["messages"][0]["content"][0]["file"]["file_data"]
+    decoded = base64.b64decode(new_b64.split(",", 1)[1])
+    out = Document(io.BytesIO(decoded))
+    assert out.core_properties.author == "<<PERSON_1>>"
+    assert mapper.reverse_lookup("<<PERSON_1>>") == "Anna Mueller"
+
+
+async def test_block_mode_blocks_on_docx_metadata_pii():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "file",
+                        "file": {
+                            "file_data": _b64_uri(_docx_with_author("Anna Mueller"), _DOCX_MIME)
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    detector = _make_detector([])
+    mapper = PseudonymMapper()
+
+    _, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.BLOCK,
+        detector=detector,
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=mapper,
+    )
+    assert result.blocked is True
+    assert result.files_blocked == 1
+    assert mapper.entity_count == 0  # block mode never touches the mapper
+
+
 # ── Size limit ───────────────────────────────────────────────
 
 

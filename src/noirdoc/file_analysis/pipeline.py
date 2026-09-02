@@ -59,6 +59,7 @@ async def analyze_files_in_body(
     )
 
     _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     text_extractor = FileTextExtractor(ocr_enabled=ocr_enabled, max_pages=max_pages)
 
     for block in file_blocks:
@@ -152,6 +153,54 @@ async def analyze_files_in_body(
                 block.entities,
                 mapper,
             )
+
+        # 5b. DOCX package parts (docProps, comment authors, people.xml,
+        # thumbnail, customXml) — surfaces the extracted text never contains.
+        if block.mime_type == _DOCX_MIME and policy.should_detect_pii():
+            from noirdoc.file_analysis.docx_parts import pseudonymize_docx_parts
+            from noirdoc.file_analysis.reconstruction import reconstruct
+
+            parts = None
+            if policy.should_pseudonymize():
+                # Body runs first (reconstruct is a no-op without entities); the
+                # parts pass then rewrites the package around the redacted body.
+                # If body reconstruction failed, apply_file_results falls back to
+                # a text block, which carries no package parts at all.
+                base = (
+                    reconstruct(block)
+                    if block.pseudonymized_text is not None
+                    else block.content_bytes
+                )
+                if base is not None:
+                    parts_bytes, parts = await pseudonymize_docx_parts(
+                        base, detector, mapper, language, apply=True
+                    )
+                    if parts_bytes is not None:
+                        block.reconstructed_bytes = parts_bytes
+                    elif base is not block.content_bytes:
+                        block.reconstructed_bytes = base
+                    if block.reconstructed_bytes is not None and block.pseudonymized_text is None:
+                        # Metadata-only hits: apply_file_results skips blocks
+                        # without pseudonymized_text.
+                        block.pseudonymized_text = block.extracted_text
+            else:
+                _, parts = await pseudonymize_docx_parts(
+                    block.content_bytes, detector, mapper, language, apply=False
+                )
+            if parts is not None and parts.entity_count > 0:
+                result.total_entities += parts.entity_count
+                for etype, count in parts.entity_types.items():
+                    result.entity_types[etype] = result.entity_types.get(etype, 0) + count
+                if policy.should_block_on_pii() and not block.entities:
+                    result.files_blocked += 1
+                    result.blocked = True
+                logger.info(
+                    "file_analysis.docx_parts",
+                    path=block.source_path,
+                    mode=mode.value,
+                    entity_count=parts.entity_count,
+                    classifications=parts.classifications,
+                )
 
     result.blocks = file_blocks
 

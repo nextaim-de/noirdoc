@@ -29,6 +29,7 @@ Policy = Literal["pseudonymize", "extract_only"]
 DetectorChoice = Literal["presidio", "gliner", "ensemble"]
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 class RedactionResult:
@@ -286,15 +287,29 @@ class Redactor:
         entity_types: dict[str, int] = {}
         for e in entities:
             entity_types[e.entity_type] = entity_types.get(e.entity_type, 0) + 1
+        entity_count = len(entities)
 
         if can_reconstruct(mime):
             new_bytes = reconstruct(block)
             if new_bytes is not None:
+                if mime == _DOCX_MIME:
+                    # Package parts the extracted text never contains: docProps,
+                    # comment authors, people.xml, thumbnail, customXml.
+                    from noirdoc.file_analysis.docx_parts import pseudonymize_docx_parts
+
+                    parts_bytes, parts = await pseudonymize_docx_parts(
+                        new_bytes, detector, self._mapper, language
+                    )
+                    if parts_bytes is not None:
+                        new_bytes = parts_bytes
+                    entity_count += parts.entity_count
+                    for etype, count in parts.entity_types.items():
+                        entity_types[etype] = entity_types.get(etype, 0) + count
                 self._persist()
                 return RedactionResult(
                     input_path=path,
                     output_bytes=new_bytes,
-                    entity_count=len(entities),
+                    entity_count=entity_count,
                     entity_types=entity_types,
                     mime_type=mime,
                     reconstructed=True,

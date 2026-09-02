@@ -2,7 +2,9 @@
 
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
-* **DOCX** – python-docx paragraph runs + table cells
+* **DOCX** – python-docx paragraph runs + table cells in body, headers/footers
+  and comments, plus package parts (docProps, comment authors, people.xml)
+  via :mod:`noirdoc.file_analysis.docx_parts`
 * **XLSX** – openpyxl cell values plus docProps, comments, headers/footers and
   pivot caches (via :mod:`noirdoc.file_analysis.xlsx_parts`)
 * **Plain text** (TXT/CSV/MD/HTML) – simple string replacement
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import io
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -90,8 +92,16 @@ def _reidentify_text(
 def _reidentify_docx(
     file_bytes: bytes, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bytes | None:
-    """Walk DOCX paragraphs and table cells, reidentify text in runs."""
+    """Walk every DOCX surface the redact side writes and reidentify it.
+
+    Mirrors ``_reconstruct_docx``: body, section headers/footers and comment
+    text as block containers, plus the package parts (docProps, comment
+    authors/initials, ``word/people.xml``) via the same slot enumerator the
+    redact side uses, so the two walkers cannot drift apart.
+    """
     from docx import Document
+
+    from noirdoc.file_analysis.docx_parts import reidentify_document_parts
 
     try:
         doc = Document(io.BytesIO(file_bytes))
@@ -99,17 +109,23 @@ def _reidentify_docx(
         logger.warning("file_reident.docx_load_failed")
         return None
 
-    changed = False
+    changed = _reidentify_block_container(doc, engine, mapper)
 
-    for para in doc.paragraphs:
-        if _reidentify_paragraph(para, engine, mapper):
-            changed = True
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if _reidentify_paragraph(para, engine, mapper):
-                        changed = True
+    for section in doc.sections:
+        for header in (section.header, section.first_page_header, section.even_page_header):
+            changed |= _reidentify_block_container(header, engine, mapper)
+        for footer in (section.footer, section.first_page_footer, section.even_page_footer):
+            changed |= _reidentify_block_container(footer, engine, mapper)
+
+    try:
+        comments = list(doc.comments)
+    except Exception:
+        comments = []
+    for comment in comments:
+        changed |= _reidentify_block_container(comment, engine, mapper)
+
+    if reidentify_document_parts(doc, engine, mapper):
+        changed = True
 
     if not changed:
         return file_bytes
@@ -117,6 +133,23 @@ def _reidentify_docx(
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _reidentify_block_container(
+    container: Any, engine: ReidentificationEngine, mapper: PseudonymMapper
+) -> bool:
+    """Reidentify every paragraph in *container* (incl. its tables)."""
+    changed = False
+    for para in container.paragraphs:
+        if _reidentify_paragraph(para, engine, mapper):
+            changed = True
+    for table in container.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    if _reidentify_paragraph(para, engine, mapper):
+                        changed = True
+    return changed
 
 
 def _reidentify_paragraph(
