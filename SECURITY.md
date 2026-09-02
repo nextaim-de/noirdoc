@@ -4,7 +4,7 @@
 
 Use GitHub's private vulnerability reporting:
 
-**<https://github.com/nextaim-de/noirdoc/security/advisories/new>**
+**<https://github.com/noirdoc-ai/mask-engine/security/advisories/new>**
 
 Please do not open a public issue for security bugs. We will acknowledge reports as soon as we can and coordinate a fix and disclosure with you.
 
