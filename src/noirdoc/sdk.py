@@ -32,7 +32,12 @@ _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 class RedactionResult:
-    """The result of redacting a single file."""
+    """The result of redacting a single file.
+
+    When ``reconstructed`` is ``False`` the ``output_bytes`` are the masked
+    *plain text* (``mime_type == "text/plain"``), not the original format;
+    ``reason`` says why the original format could not be preserved.
+    """
 
     def __init__(
         self,
@@ -43,6 +48,7 @@ class RedactionResult:
         entity_types: dict[str, int],
         mime_type: str,
         reconstructed: bool,
+        reason: str | None = None,
     ) -> None:
         self.input_path = input_path
         self.output_bytes = output_bytes
@@ -50,6 +56,7 @@ class RedactionResult:
         self.entity_types = entity_types
         self.mime_type = mime_type
         self.reconstructed = reconstructed
+        self.reason = reason
 
     def write(self, path: Path | str) -> Path:
         """Write output bytes to *path* and return it."""
@@ -299,6 +306,9 @@ class Redactor:
                     mime_type=mime,
                     reconstructed=True,
                 )
+            reason = f"reconstruction failed for {mime}"
+        else:
+            reason = f"format {mime} does not support in-place reconstruction"
 
         # Fallback: return the extracted, pseudonymized plain text.
         self._persist()
@@ -309,6 +319,7 @@ class Redactor:
             entity_types=entity_types,
             mime_type="text/plain",
             reconstructed=False,
+            reason=reason,
         )
 
     def reveal_file(

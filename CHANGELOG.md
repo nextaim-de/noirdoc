@@ -5,6 +5,17 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Plain-text fallback is now visible.** When DOCX/XLSX reconstruction fails
+  (or the format never supported it, e.g. PDF), `noirdoc redact` no longer
+  writes masked UTF-8 text into an explicit non-`.txt` `-o` target: the output
+  is redirected to `<stem>.txt` and a warning naming both paths (plus the
+  reason) is printed on stderr — on the in-process and the daemon path alike.
+  `RedactionResult` and the daemon protocol's `RedactResult` gained a
+  `reason: str | None` field explaining why the original format was dropped
+  (`reconstructed=False`, `mime_type="text/plain"` remain the machine
+  signals). (#10)
+
 ## [0.1.3] — 2026-09-01
 
 Security patch: XLSX redaction now covers everything outside the cell grid —

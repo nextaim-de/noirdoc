@@ -43,7 +43,8 @@ For anything beyond toy examples, use `noirdoc[full]` — the ensemble catches w
 
 ```bash
 # One-shot redact (ephemeral mapping, discarded on exit).
-noirdoc redact vertrag.pdf -o vertrag-clean.pdf
+# PDFs come back as masked plain text, so the output is a .txt file.
+noirdoc redact vertrag.pdf -o vertrag-clean.txt
 
 # Persistent namespace — placeholders stay consistent across files and sessions.
 noirdoc redact --namespace mandant-mueller brief.docx -o brief-clean.docx
@@ -55,7 +56,7 @@ noirdoc lookup --namespace mandant-mueller "<<PERSON_3>>"
 from noirdoc import Redactor
 
 r = Redactor(namespace="mandant-mueller")
-r.redact_file("vertrag.pdf", output="vertrag-clean.pdf")
+r.redact_file("vertrag.pdf", output="vertrag-clean.txt")  # PDFs fall back to plain text
 r.redact_file("brief.docx", output="brief-clean.docx")
 r.reveal_text(llm_response)  # un-redact the model's reply
 ```
@@ -88,6 +89,7 @@ Run `noirdoc <cmd> --help` for the full flag list on any subcommand.
 A few honest caveats before you ship this into a pipeline:
 
 - **Best results need `[full]`.** On first use (or via `noirdoc models pull`) the full extra downloads roughly **560 MB** of weights: spaCy `de_core_news_lg`, Flair `ner-german-large`, and a GLiNER multilingual model. Budget disk and bandwidth.
+- **Not every format survives redaction with formatting intact.** PDFs and images always come back as masked plain text, and DOCX/XLSX fall back to plain text when reconstruction fails. You can tell it happened by three signals: the CLI writes `*_redacted.txt` (an explicit non-`.txt` `-o` target is redirected to `<stem>.txt` with a warning on stderr), and the SDK's `RedactionResult` has `mime_type="text/plain"` and `reconstructed=False`, with `reason` saying why. A `.docx`/`.xlsx` path never silently receives UTF-8 text.
 - **PDF reveal is not supported yet.** Round-tripping placeholders back into a PDF is a hard problem (position drift, font metrics, image-based redactions). PDFs redact cleanly; reveal is pass-through. DOCX, XLSX, and plain text round-trip.
 - **XLSX output is re-serialized by openpyxl.** Redaction covers cells, `docProps` (core + custom properties), cell comments, headers/footers and pivot caches, and reveals them all. Threaded comments, `xl/persons` and `app.xml` Manager/Company are dropped on write (counted, not reversible); shapes, slicers, macros and other parts openpyxl cannot model do not survive the round-trip. Not covered yet: chart value caches and titles, hyperlink targets and tooltips, AutoFilter criteria, conditional-formatting literals, data-validation lists and prompts, pivot-table captions and label filters, defined names, sheet titles.
 - **DOCX metadata is not scrubbed yet.** DOCX redaction rewrites body, header/footer and comment text; `docProps` (creator, lastModifiedBy, title, `app.xml` Company/Manager, the `thumbnail.jpeg` preview) and comment authors pass through unchanged. Tracked as a follow-up to the XLSX work.
