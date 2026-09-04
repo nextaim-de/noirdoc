@@ -22,9 +22,6 @@ wheels/
 .eggs/
 pip-wheel-metadata/
 
-# Lock files (library — downstream should re-resolve)
-poetry.lock
-
 # Test / type / coverage artefacts
 .pytest_cache/
 .ruff_cache/

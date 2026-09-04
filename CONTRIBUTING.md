@@ -5,39 +5,42 @@ Thanks for your interest. Noirdoc is early — API will change — but contribut
 ## Prerequisites
 
 - Python 3.12 or 3.13
-- [Poetry](https://python-poetry.org/) 2.0 or later — `pipx install poetry` if you don't have it.
+- [uv](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh` if you don't have it.
 - ~1 GB free disk for the `full` extra (GLiNER + Flair weights).
 
 ## Dev setup
 
 ```bash
-git clone https://github.com/nextaim-de/noirdoc.git
-cd noirdoc
-poetry env use 3.12                              # or 3.13
-poetry install --all-extras                      # dev + full + redis
-poetry run python -m spacy download de_core_news_lg
-poetry run pre-commit install
+git clone https://github.com/noirdoc-ai/mask-engine.git
+cd mask-engine
+make install                                     # uv sync --extra dev
+uv run python -m spacy download de_core_news_lg
+uv run pre-commit install
 ```
 
-Poetry manages the local environment and resolves dependencies fresh from `pyproject.toml` on each checkout — noirdoc is a library, so the lockfile is not tracked (downstream consumers re-resolve). The build backend is `hatchling`; the published wheel is built from `[project]` metadata. CI uses plain `pip install -e ".[dev]"` for speed.
+uv manages the local environment from the committed `uv.lock`; `make install` creates `.venv/` with the `dev` extra. For work on the ensemble detectors, add the ML extras: `uv sync --extra dev --extra full --extra redis`. The build backend is `hatchling`; the published wheel is built from `[project]` metadata. CI uses `astral-sh/setup-uv` with the same `uv sync --extra dev`.
 
 ## Running tests
 
 ```bash
-poetry run pytest                 # fast tier (CI default)
-poetry run pytest -m slow         # includes model-loading tests
-poetry run pytest -m "not slow"   # same as CI
+make test               # fast tier, -m "not slow" (same as CI)
+make test-slow          # model-loading tests (needs the full extra)
+uv run pytest           # everything, unfiltered
 ```
 
-Prefer `poetry shell` if you'd rather not prefix every command.
+Prefix one-off commands with `uv run`, or activate `.venv/` if you'd rather not.
 
 ## Lint and formatting
 
 `pre-commit` runs ruff (check + format), mypy, pyupgrade, gitleaks, and a few hygiene hooks. CI enforces the same config.
 
 ```bash
-poetry run pre-commit run --all-files
+make check              # fmt-check + lint + typecheck + test — mirrors CI
+make fmt                # auto-format
+uv run pre-commit run --all-files
 ```
+
+Run `make help` for the full target list.
 
 ## Adding a detector
 
@@ -58,6 +61,6 @@ Only maintainers cut releases. The flow is tag-driven and uses PyPI Trusted Publ
 
 ## Reporting bugs
 
-Open an issue at <https://github.com/nextaim-de/noirdoc/issues>. Include Python version, OS, the command or code that triggered the bug, and the traceback if any. A minimal reproducer helps a lot.
+Open an issue at <https://github.com/noirdoc-ai/mask-engine/issues>. Include Python version, OS, the command or code that triggered the bug, and the traceback if any. A minimal reproducer helps a lot.
 
 For security-sensitive bugs, see [SECURITY.md](SECURITY.md) — do not open a public issue.
