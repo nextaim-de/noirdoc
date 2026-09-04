@@ -169,7 +169,8 @@ def _redact_via_daemon(
             return success, last_namespace_size, list(files[i:])
 
         # If the daemon couldn't reconstruct the file, the output it wrote
-        # is plain text — rename to .txt to match in-process behaviour.
+        # is plain text — rename to .txt to match in-process behaviour
+        # (this also redirects an explicit non-.txt --output) and say so.
         if not result.get("reconstructed", False):
             corrected = _choose_output_path(
                 path,
@@ -180,6 +181,12 @@ def _redact_via_daemon(
             if corrected != out_path:
                 Path(out_path).rename(corrected)
                 out_path = corrected
+            _warn_plain_text_fallback(
+                path,
+                requested=output,
+                out_path=out_path,
+                reason=result.get("reason"),
+            )
 
         last_namespace_size = result.get("namespace_size") or last_namespace_size
 
@@ -232,6 +239,14 @@ def _redact_in_process(
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(result.output_bytes)
+
+        if not result.reconstructed:
+            _warn_plain_text_fallback(
+                path,
+                requested=output,
+                out_path=out_path,
+                reason=result.reason,
+            )
 
         if verbose:
             types = ", ".join(f"{k}={v}" for k, v in sorted(result.entity_types.items()))
@@ -540,6 +555,10 @@ def _choose_output_path(
     safe_name = Path(input_path.name)
     if output:
         chosen = output
+        if not reconstructed and chosen.suffix.lower() != ".txt":
+            # The output is masked plain text, not the requested format —
+            # never write UTF-8 text into a .docx/.pdf/... path.
+            chosen = chosen.with_name(f"{chosen.stem or chosen.name}.txt")
     else:
         parent = output_dir or input_path.parent
         if reconstructed:
@@ -547,6 +566,29 @@ def _choose_output_path(
         else:
             chosen = parent / f"{safe_name.stem}_redacted.txt"
     return _guard_output_path(chosen, output_dir=output_dir)
+
+
+def _warn_plain_text_fallback(
+    input_path: Path,
+    *,
+    requested: Path | None,
+    out_path: Path,
+    reason: str | None,
+) -> None:
+    """Tell the user (on stderr) that formatting was dropped in favour of plain text."""
+    detail = f": {reason}" if reason else ""
+    if requested is not None and requested.resolve() != out_path:
+        click.echo(
+            f"{input_path.name}: could not preserve the original format{detail}; "
+            f"wrote masked plain text to {out_path} instead of {requested}.",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"{input_path.name}: could not preserve the original format{detail}; "
+            f"output is masked plain text.",
+            err=True,
+        )
 
 
 if __name__ == "__main__":

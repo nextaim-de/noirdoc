@@ -86,10 +86,10 @@ noirdoc-daemon = "noirdoc.daemon.server:main"
 
 [project.urls]
 Homepage      = "https://noirdoc.de"
-Repository    = "https://github.com/nextaim-de/noirdoc"
-Documentation = "https://github.com/nextaim-de/noirdoc#readme"
-Issues        = "https://github.com/nextaim-de/noirdoc/issues"
-Changelog     = "https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md"
+Repository    = "https://github.com/noirdoc-ai/mask-engine"
+Documentation = "https://github.com/noirdoc-ai/mask-engine#readme"
+Issues        = "https://github.com/noirdoc-ai/mask-engine/issues"
+Changelog     = "https://github.com/noirdoc-ai/mask-engine/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 source = "vcs"

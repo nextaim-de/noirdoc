@@ -30,6 +30,22 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Cap on distinct free-text parts (comments, docProps, headers/footers) scanned
+# by NER per workbook in detect/block modes. Redact mode ignores the cap: a
+# capped redact pass would silently forward unmasked text upstream.
+DEFAULT_MAX_FREE_TEXTS = 1000
+
+
+class XlsxLoadError(RuntimeError):
+    """The XLSX package could not be safely loaded for analysis.
+
+    Raised for zip-safety rejections (oversized archives, zip bombs), corrupt
+    or truncated packages, and openpyxl parse failures (e.g. pivot caches with
+    manually grouped fields). Callers must fail closed: an unloadable workbook
+    was never analysed, so its original bytes must not be written out or
+    forwarded as if they were redacted.
+    """
+
 
 class DetectorLike(Protocol):
     """Minimal detector interface used here: just async ``detect``.
@@ -179,6 +195,9 @@ class XlsxResult:
     entity_count: int = 0
     entity_types: dict[str, int] = field(default_factory=dict)
     column_classifications: dict[str, str] = field(default_factory=dict)
+    # Distinct free-text parts (comments, docProps, headers/footers) NOT run
+    # through the detector — cap or block-mode early exit, detect/block only.
+    free_texts_skipped: int = 0
 
     def merge_parts(self, entity_types: dict[str, int], classifications: dict[str, str]) -> None:
         for entity_type, count in entity_types.items():
@@ -194,12 +213,24 @@ async def pseudonymize_xlsx_smart(
     language: str = "de",
     sample_rows: int = 5,
     pseudonymize: bool = True,
+    max_free_texts: int | None = DEFAULT_MAX_FREE_TEXTS,
+    stop_on_first_hit: bool = False,
 ) -> XlsxResult:
     """Analyse and optionally pseudonymize an XLSX file using column-type inference.
 
     When *pseudonymize* is ``True``, cells in classified columns are replaced
     via ``mapper.get_or_create()`` and the modified workbook is returned.
     When ``False``, cells are only counted (for detect-only / block modes).
+
+    *max_free_texts* (``None`` = no cap) and *stop_on_first_hit*
+    (block mode: any hit settles the decision, so the free-text NER pass stops
+    early) bound the part-level scan. Both are ignored when *pseudonymize* is
+    ``True`` — redact mode must scan everything it rewrites. Skipped texts are
+    reported in ``XlsxResult.free_texts_skipped``, never dropped silently.
+
+    Raises :class:`XlsxLoadError` when the package cannot be loaded (zip-safety
+    rejection, corrupt archive, openpyxl parse failure). Returning an empty
+    result here would let callers treat the original workbook as redacted.
     """
     from openpyxl import load_workbook
 
@@ -212,7 +243,7 @@ async def pseudonymize_xlsx_smart(
         wb = load_workbook(io.BytesIO(data))
     except Exception as exc:
         logger.warning("xlsx_inference.load_failed", error=str(exc))
-        return result
+        raise XlsxLoadError(f"cannot load xlsx workbook: {exc}") from exc
 
     # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
     from noirdoc.file_analysis.xlsx_parts import (
@@ -220,6 +251,8 @@ async def pseudonymize_xlsx_smart(
         count_unsupported_part_pii,
         pseudonymize_workbook_parts,
     )
+
+    stop_on_first_hit = stop_on_first_hit and not pseudonymize
 
     clear_phantom_creator(wb, data)
     # lower-cased header -> entity type, so pivot fields built from a classified column
@@ -286,6 +319,9 @@ async def pseudonymize_xlsx_smart(
                 result.entity_types[entity_type] = result.entity_types.get(entity_type, 0) + 1
 
     # --- Parts outside the cell grid: docProps, comments, headers/footers, pivot caches ---
+    # Block mode: a cell-grid hit already settles the decision, so skip the
+    # free-text NER pass entirely (reported as skipped, not silently dropped).
+    parts_free_limit = 0 if stop_on_first_hit and result.entity_count > 0 else max_free_texts
     parts = await pseudonymize_workbook_parts(
         wb,
         detector,
@@ -294,8 +330,11 @@ async def pseudonymize_xlsx_smart(
         apply=pseudonymize,
         sample_size=sample_rows,
         known_fields=known_fields,
+        max_free_texts=parts_free_limit,
+        stop_on_first_hit=stop_on_first_hit,
     )
     result.merge_parts(parts.entity_types, parts.classifications)
+    result.free_texts_skipped = parts.free_texts_skipped
     dropped = count_unsupported_part_pii(data)
     result.merge_parts(dropped.entity_types, dropped.classifications)
 
@@ -311,6 +350,7 @@ async def pseudonymize_xlsx_smart(
         entity_count=result.entity_count,
         entity_types=result.entity_types,
         columns=result.column_classifications,
+        free_texts_skipped=result.free_texts_skipped,
     )
 
     return result

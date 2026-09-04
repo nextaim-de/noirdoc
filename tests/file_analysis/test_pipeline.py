@@ -236,6 +236,85 @@ async def test_pseudonymize_pdf_converts_to_text():
     assert result.files_extraction_errors == 1
 
 
+# ── XLSX fail-closed (issue #13) ─────────────────────────────
+
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _truncated_xlsx() -> bytes:
+    """A real workbook cut off mid-archive — openpyxl/zipfile cannot load it."""
+    from openpyxl import Workbook
+
+    from tests.file_analysis.xlsx_helpers import workbook_bytes
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Name"])
+    ws.append(["Anna Mueller"])
+    return workbook_bytes(wb)[:128]
+
+
+async def test_xlsx_load_failure_blocks_instead_of_forwarding_original():
+    """A workbook that cannot be loaded was never analysed — pseudonymize mode must
+    block the request rather than let the original file reach the provider."""
+    original_uri = _b64_uri(_truncated_xlsx(), _XLSX_MIME)
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "file", "file": {"file_data": original_uri}}],
+            },
+        ],
+    }
+    detector = _make_detector()
+
+    result_body, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.PSEUDONYMIZE,
+        detector=detector,
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=PseudonymMapper(),
+    )
+
+    assert result.blocked is True
+    assert result.files_blocked == 1
+    assert result.files_extraction_errors == 1
+    assert result.files_reconstructed == 0
+    # The block carries the reason and no pseudonymized output was claimed.
+    assert result.blocks[0].extraction_error is not None
+    assert result.blocks[0].pseudonymized_text is None
+    # Body is untouched; the caller must reject the request because blocked=True.
+    assert result_body["messages"][0]["content"][0]["file"]["file_data"] == original_uri
+
+
+async def test_xlsx_load_failure_detect_only_counts_error_without_blocking():
+    """Detect-only never modifies or blocks by design — the failure is still recorded."""
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "file", "file": {"file_data": _b64_uri(_truncated_xlsx(), _XLSX_MIME)}}
+                ],
+            },
+        ],
+    }
+
+    _, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.DETECT_ONLY,
+        detector=_make_detector(),
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=PseudonymMapper(),
+    )
+
+    assert result.blocked is False
+    assert result.files_extraction_errors == 1
+
+
 # ── Size limit ───────────────────────────────────────────────
 
 
