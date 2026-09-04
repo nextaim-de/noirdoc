@@ -36,6 +36,17 @@ logger = structlog.get_logger()
 DEFAULT_MAX_FREE_TEXTS = 1000
 
 
+class XlsxLoadError(RuntimeError):
+    """The XLSX package could not be safely loaded for analysis.
+
+    Raised for zip-safety rejections (oversized archives, zip bombs), corrupt
+    or truncated packages, and openpyxl parse failures (e.g. pivot caches with
+    manually grouped fields). Callers must fail closed: an unloadable workbook
+    was never analysed, so its original bytes must not be written out or
+    forwarded as if they were redacted.
+    """
+
+
 class DetectorLike(Protocol):
     """Minimal detector interface used here: just async ``detect``.
 
@@ -216,6 +227,10 @@ async def pseudonymize_xlsx_smart(
     early) bound the part-level scan. Both are ignored when *pseudonymize* is
     ``True`` — redact mode must scan everything it rewrites. Skipped texts are
     reported in ``XlsxResult.free_texts_skipped``, never dropped silently.
+
+    Raises :class:`XlsxLoadError` when the package cannot be loaded (zip-safety
+    rejection, corrupt archive, openpyxl parse failure). Returning an empty
+    result here would let callers treat the original workbook as redacted.
     """
     from openpyxl import load_workbook
 
@@ -228,7 +243,7 @@ async def pseudonymize_xlsx_smart(
         wb = load_workbook(io.BytesIO(data))
     except Exception as exc:
         logger.warning("xlsx_inference.load_failed", error=str(exc))
-        return result
+        raise XlsxLoadError(f"cannot load xlsx workbook: {exc}") from exc
 
     # Lazy import: xlsx_parts imports infer_entity_type / classify_by_sample from here.
     from noirdoc.file_analysis.xlsx_parts import (
