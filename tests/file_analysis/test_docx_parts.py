@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from docx import Document
 from docx.document import Document as DocumentObject
 
-from noirdoc.file_analysis.docx_parts import pseudonymize_docx_parts
+from noirdoc.file_analysis.docx_parts import DocxPartsError, pseudonymize_docx_parts
 from noirdoc.file_analysis.models import FileBlock
 from noirdoc.file_analysis.reconstruction import reconstruct
 from noirdoc.file_analysis.xlsx_parts import PartsResult
@@ -122,7 +123,11 @@ async def test_default_template_noise_is_reported_not_leaked():
     new_bytes, result, _mapper = await _redact(data)
 
     assert new_bytes is not None
-    assert result.entity_types == {"PERSON": 1, "THUMBNAIL": 1, "CUSTOM_XML": 1}
+    # The template's creator is a real string in core.xml, so it is an entity.
+    # The thumbnail and the customXml island are not: they say nothing about
+    # whether the document holds PII, and every python-docx document has them.
+    assert result.entity_types == {"PERSON": 1}
+    assert result.dropped_parts == {"THUMBNAIL": 1, "CUSTOM_XML": 1}
     out = Document(io.BytesIO(new_bytes))
     assert out.core_properties.author == "<<PERSON_1>>"  # "python-docx" — no allowlist
     names = part_names(new_bytes)
@@ -240,7 +245,7 @@ async def test_people_scrubbed_consistent_with_comment_author():
 # ── dropped parts ────────────────────────────────────────
 
 
-async def test_thumbnail_dropped_and_counted():
+async def test_thumbnail_dropped_and_reported_but_not_an_entity():
     data = inject_thumbnail(clean_document_bytes(_doc()))
 
     new_bytes, result, _mapper = await _redact(data)
@@ -248,11 +253,12 @@ async def test_thumbnail_dropped_and_counted():
     assert new_bytes is not None
     assert "docProps/thumbnail.jpeg" not in part_names(new_bytes)
     assert b"thumbnail" not in read_part(new_bytes, "_rels/.rels")
-    assert result.entity_types == {"THUMBNAIL": 1}
+    assert result.dropped_parts == {"THUMBNAIL": 1}
+    assert result.entity_types == {}  # a dropped part is not a PII finding
     assert result.classifications["docProps.thumbnail"] == "THUMBNAIL (dropped)"
 
 
-async def test_custom_xml_island_dropped_and_counted():
+async def test_custom_xml_island_dropped_and_reported_but_not_an_entity():
     data = inject_custom_xml(
         clean_document_bytes(_doc()),
         xml_text="<kunde><name>Anna Mueller</name><iban>DE02120300000000202051</iban></kunde>",
@@ -263,7 +269,8 @@ async def test_custom_xml_island_dropped_and_counted():
     assert new_bytes is not None
     assert not any(n.startswith("customXml/") for n in part_names(new_bytes))
     assert b"customXml" not in read_part(new_bytes, "word/_rels/document.xml.rels")
-    assert result.entity_types == {"CUSTOM_XML": 1}
+    assert result.dropped_parts == {"CUSTOM_XML": 1}
+    assert result.entity_types == {}
     assert result.classifications["customXml.item1"] == "CUSTOM_XML (dropped)"
     assert_no_part_contains(new_bytes, ["Anna Mueller", "DE02120300000000202051"])
 
@@ -278,7 +285,10 @@ async def test_unreadable_people_part_dropped_not_passed_through():
 
     assert new_bytes is not None
     assert "word/people.xml" not in part_names(new_bytes)
-    assert result.entity_types == {"UNREADABLE_PART": 1}
+    # Dropping an unparseable part is a precaution, not a finding: nothing was
+    # read, so nothing was found.
+    assert result.dropped_parts == {"UNREADABLE_PART": 1}
+    assert result.entity_types == {}
     assert result.classifications["word/people.xml"] == "UNREADABLE_PART (dropped)"
 
 
@@ -297,8 +307,9 @@ async def test_apply_false_counts_without_writing_or_mapping():
     new_bytes, result, mapper = await _redact(data, apply=False)
 
     assert new_bytes is None
-    # author + comment author + Manager + Company + thumbnail
-    assert result.entity_types == {"PERSON": 3, "ORGANIZATION": 1, "THUMBNAIL": 1}
+    # author + comment author + Manager + Company
+    assert result.entity_types == {"PERSON": 3, "ORGANIZATION": 1}
+    assert result.dropped_parts == {"THUMBNAIL": 1}
     assert mapper.get_mapping_summary() == {}
 
 
@@ -412,3 +423,18 @@ def test_reveal_covers_headers_footers_and_comment_text():
     comment = next(iter(out.comments))
     assert comment.text == "Frag Anna Mueller"
     assert comment.author == "Dora Klein"
+
+
+# ── fail closed ──────────────────────────────────────────
+
+
+async def test_unloadable_package_raises_instead_of_silently_skipping():
+    """A load failure must not look like "nothing to scrub".
+
+    The body may already be redacted; returning these bytes with no error
+    would ship a document whose docProps still name the author.
+    """
+    with pytest.raises(DocxPartsError):
+        await pseudonymize_docx_parts(
+            b"PK\x03\x04 not a real package", SubstringDetector({}), PseudonymMapper(), "de"
+        )

@@ -157,36 +157,57 @@ async def analyze_files_in_body(
         # 5b. DOCX package parts (docProps, comment authors, people.xml,
         # thumbnail, customXml) — surfaces the extracted text never contains.
         if block.mime_type == _DOCX_MIME and policy.should_detect_pii():
-            from noirdoc.file_analysis.docx_parts import pseudonymize_docx_parts
+            from noirdoc.file_analysis.docx_parts import DocxPartsError, pseudonymize_docx_parts
             from noirdoc.file_analysis.reconstruction import reconstruct
 
             parts = None
-            if policy.should_pseudonymize():
-                # Body runs first (reconstruct is a no-op without entities); the
-                # parts pass then rewrites the package around the redacted body.
-                # If body reconstruction failed, apply_file_results falls back to
-                # a text block, which carries no package parts at all.
-                base = (
-                    reconstruct(block)
-                    if block.pseudonymized_text is not None
-                    else block.content_bytes
-                )
-                if base is not None:
-                    parts_bytes, parts = await pseudonymize_docx_parts(
-                        base, detector, mapper, language, apply=True
+            try:
+                if policy.should_pseudonymize():
+                    # Body runs first (reconstruct is a no-op without entities); the
+                    # parts pass then rewrites the package around the redacted body.
+                    # If body reconstruction failed, apply_file_results falls back to
+                    # a text block, which carries no package parts at all.
+                    base = (
+                        reconstruct(block)
+                        if block.pseudonymized_text is not None
+                        else block.content_bytes
                     )
-                    if parts_bytes is not None:
-                        block.reconstructed_bytes = parts_bytes
-                    elif base is not block.content_bytes:
-                        block.reconstructed_bytes = base
-                    if block.reconstructed_bytes is not None and block.pseudonymized_text is None:
-                        # Metadata-only hits: apply_file_results skips blocks
-                        # without pseudonymized_text.
-                        block.pseudonymized_text = block.extracted_text
-            else:
-                _, parts = await pseudonymize_docx_parts(
-                    block.content_bytes, detector, mapper, language, apply=False
+                    if base is not None:
+                        parts_bytes, parts = await pseudonymize_docx_parts(
+                            base, detector, mapper, language, apply=True
+                        )
+                        if parts_bytes is not None:
+                            block.reconstructed_bytes = parts_bytes
+                        elif base is not block.content_bytes:
+                            block.reconstructed_bytes = base
+                        if (
+                            block.reconstructed_bytes is not None
+                            and block.pseudonymized_text is None
+                        ):
+                            # Metadata-only hits: apply_file_results skips blocks
+                            # without pseudonymized_text.
+                            block.pseudonymized_text = block.extracted_text
+                else:
+                    _, parts = await pseudonymize_docx_parts(
+                        block.content_bytes, detector, mapper, language, apply=False
+                    )
+            except DocxPartsError as exc:
+                # Fail closed: docProps, comment authors and people.xml were never
+                # scrubbed, so these bytes must not reach the provider in modes
+                # that promise masking or blocking.
+                block.extraction_error = str(exc)
+                result.files_extraction_errors += 1
+                if policy.should_pseudonymize() or policy.should_block_on_pii():
+                    result.files_blocked += 1
+                    result.blocked = True
+                logger.warning(
+                    "file_analysis.docx_parts_failed",
+                    path=block.source_path,
+                    mode=mode.value,
+                    error=str(exc),
                 )
+                continue
+
             if parts is not None and parts.entity_count > 0:
                 result.total_entities += parts.entity_count
                 for etype, count in parts.entity_types.items():
@@ -194,11 +215,16 @@ async def analyze_files_in_body(
                 if policy.should_block_on_pii() and not block.entities:
                     result.files_blocked += 1
                     result.blocked = True
+            if parts is not None and (parts.entity_count or parts.dropped_count):
+                # Dropped parts are logged but never counted or blocked on: a
+                # thumbnail and a customXml island say nothing about whether the
+                # document holds PII, and most Word templates carry both.
                 logger.info(
                     "file_analysis.docx_parts",
                     path=block.source_path,
                     mode=mode.value,
                     entity_count=parts.entity_count,
+                    dropped_parts=parts.dropped_parts,
                     classifications=parts.classifications,
                 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Any
 from unittest.mock import AsyncMock
 
 from noirdoc.detection.base import DetectedEntity
@@ -330,6 +331,89 @@ async def test_block_mode_blocks_on_docx_metadata_pii():
     assert result.blocked is True
     assert result.files_blocked == 1
     assert mapper.entity_count == 0  # block mode never touches the mapper
+
+
+async def test_block_mode_allows_docx_whose_only_extras_are_dropped_parts():
+    """A template thumbnail and customXml island are not PII and must not block.
+
+    ``_docx_with_author`` strips them; this one deliberately keeps them, because
+    every python-docx document — and most documents from a corporate Word
+    template — ships both.
+    """
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Der Vertrag ist unterschrieben.")
+    doc.core_properties.author = ""
+    doc.core_properties.last_modified_by = ""
+    doc.core_properties.title = ""
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "file", "file": {"file_data": _b64_uri(buf.getvalue(), _DOCX_MIME)}},
+                ],
+            },
+        ],
+    }
+
+    _, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.BLOCK,
+        detector=_make_detector([]),
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=PseudonymMapper(),
+    )
+    assert result.blocked is False
+    assert result.files_blocked == 0
+    assert result.total_entities == 0
+
+
+async def test_docx_parts_load_failure_blocks_instead_of_forwarding_original(monkeypatch):
+    """An unloadable package means docProps were never scrubbed — fail closed."""
+    from noirdoc.file_analysis import docx_parts
+
+    async def _boom(*_args, **_kwargs):
+        raise docx_parts.DocxPartsError("cannot load docx package: archive too large")
+
+    monkeypatch.setattr(docx_parts, "pseudonymize_docx_parts", _boom)
+
+    body: dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "file",
+                        "file": {
+                            "file_data": _b64_uri(_docx_with_author("Anna Mueller"), _DOCX_MIME)
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    original = body["messages"][0]["content"][0]["file"]["file_data"]
+    result_body, result = await analyze_files_in_body(
+        body=body,
+        stream_key="openai_chat",
+        mode=FileAnalysisMode.PSEUDONYMIZE,
+        detector=_make_detector([]),
+        pseudo_engine=PseudonymizationEngine(),
+        mapper=PseudonymMapper(),
+    )
+    assert result.blocked is True
+    assert result.files_extraction_errors == 1
+    # The body is untouched, and blocked=True is what stops the caller sending it.
+    assert result_body["messages"][0]["content"][0]["file"]["file_data"] == original
 
 
 # ── Size limit ───────────────────────────────────────────────

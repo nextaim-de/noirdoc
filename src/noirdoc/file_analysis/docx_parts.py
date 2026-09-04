@@ -62,6 +62,18 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+
+class DocxPartsError(RuntimeError):
+    """The DOCX package could not be opened for the part-level scrub.
+
+    Raised for zip-safety rejections and corrupt packages. Callers must fail
+    closed: the body may already be redacted, but ``docProps``, comment authors
+    and ``people.xml`` were never touched, so the bytes must not go out as a
+    finished redaction. Mirrors
+    :class:`~noirdoc.file_analysis.xlsx_inference.XlsxLoadError`.
+    """
+
+
 _PLACEHOLDER = re.compile(r"<<[A-Z_]+_\d+>>")
 
 # core.xml fields that are a person (or account) by definition — never rely on NER.
@@ -291,13 +303,21 @@ def _drop_part(doc: DocumentObject, target: Any) -> bool:
 
 
 def _handle_unmappable_parts(doc: DocumentObject, result: PartsResult, *, apply: bool) -> bool:
-    """Count (and with *apply*, drop) parts that cannot be pseudonymized."""
+    """Report (and with *apply*, drop) parts that cannot be pseudonymized.
+
+    These land in ``result.dropped_parts``, never in ``entity_types``. Their
+    presence says nothing about whether the document holds PII — python-docx's
+    own default template ships a thumbnail and a customXml island, and so do
+    most documents built from a corporate Word template. Counting them as
+    entities would inflate every DOCX's entity count and reject every DOCX in
+    block mode.
+    """
     changed = False
 
     for rid, rel in list(doc.part.package.rels.items()):
         if rel.is_external or not rel.reltype.endswith(_THUMBNAIL_RELTYPE_SUFFIX):
             continue
-        result._add("THUMBNAIL")
+        result._add_dropped("THUMBNAIL")
         result.classifications["docProps.thumbnail"] = "THUMBNAIL (dropped)"
         if apply:
             del doc.part.package.rels[rid]
@@ -308,18 +328,19 @@ def _handle_unmappable_parts(doc: DocumentObject, result: PartsResult, *, apply:
         if rel.is_external or not rel.reltype.endswith(_CUSTOM_XML_RELTYPE_SUFFIX):
             continue
         ordinal += 1
-        result._add("CUSTOM_XML")
+        result._add_dropped("CUSTOM_XML")
         result.classifications[f"customXml.item{ordinal}"] = "CUSTOM_XML (dropped)"
         if apply:
             del doc.part.rels[rid]
             changed = True
 
     # Fail closed: a part this module is supposed to rewrite but cannot parse
-    # would otherwise pass through verbatim, PII included.
+    # would otherwise pass through verbatim, PII included. Dropping it is a
+    # precaution, not a finding — nothing was read, so nothing was found.
     for name, part in _find_scrubbed_parts(doc):
         if _parse_part(name, part) is not None:
             continue
-        result._add("UNREADABLE_PART")
+        result._add_dropped("UNREADABLE_PART")
         result.classifications[name.lstrip("/")] = "UNREADABLE_PART (dropped)"
         if apply and _drop_part(doc, part):
             changed = True
@@ -395,7 +416,12 @@ async def pseudonymize_document_parts(
     if _handle_unmappable_parts(doc, result, apply=apply):
         changed = True
 
-    logger.debug("docx_parts.completed", entity_types=result.entity_types, apply=apply)
+    logger.debug(
+        "docx_parts.completed",
+        entity_types=result.entity_types,
+        dropped_parts=result.dropped_parts,
+        apply=apply,
+    )
     return result, changed
 
 
@@ -411,6 +437,11 @@ async def pseudonymize_docx_parts(
 
     Returns ``(new_bytes, result)``; ``new_bytes`` is ``None`` when nothing
     changed (or with ``apply=False``), so the caller keeps its input.
+
+    Raises :class:`DocxPartsError` when the package cannot be loaded (zip-safety
+    rejection, corrupt archive). Swallowing that would hand the caller a
+    document whose body was redacted but whose ``docProps`` still name the
+    author — reported as a clean redaction.
     """
     from docx import Document
 
@@ -422,7 +453,7 @@ async def pseudonymize_docx_parts(
         doc = Document(io.BytesIO(data))
     except Exception as exc:
         logger.warning("docx_parts.load_failed", error=str(exc))
-        return None, result
+        raise DocxPartsError(f"cannot load docx package: {exc}") from exc
 
     result, changed = await pseudonymize_document_parts(
         doc, detector, mapper, language, apply=apply

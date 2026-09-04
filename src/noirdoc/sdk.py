@@ -295,11 +295,21 @@ class Redactor:
                 if mime == _DOCX_MIME:
                     # Package parts the extracted text never contains: docProps,
                     # comment authors, people.xml, thumbnail, customXml.
-                    from noirdoc.file_analysis.docx_parts import pseudonymize_docx_parts
-
-                    parts_bytes, parts = await pseudonymize_docx_parts(
-                        new_bytes, detector, self._mapper, language
+                    from noirdoc.file_analysis.docx_parts import (
+                        DocxPartsError,
+                        pseudonymize_docx_parts,
                     )
+
+                    try:
+                        parts_bytes, parts = await pseudonymize_docx_parts(
+                            new_bytes, detector, self._mapper, language
+                        )
+                    except DocxPartsError as exc:
+                        # Fail closed: the body is redacted but docProps are not,
+                        # and returning these bytes would call that a clean file.
+                        raise RuntimeError(
+                            f"DOCX metadata scrub failed for {path.name}: {exc}"
+                        ) from exc
                     if parts_bytes is not None:
                         new_bytes = parts_bytes
                     entity_count += parts.entity_count
