@@ -366,3 +366,195 @@ async def test_detect_mode_cap_is_surfaced_on_result():
     )
 
     assert result.free_texts_skipped == 1
+
+
+# ── row 1: header label or first record? (issue #30) ─────
+
+
+def _rows_bytes(rows: list[list[object]], *, title: str = "Daten") -> bytes:
+    """A sheet built from *rows* with no header row prepended."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = title
+    for row in rows:
+        ws.append(row)
+    wb.properties.creator = ""
+    return workbook_bytes(wb)
+
+
+async def test_row_one_is_redacted_when_the_column_below_says_it_is_data():
+    """A list pasted without a header shipped its whole first record."""
+    data = _rows_bytes([["Anna Mueller"], ["Ben Schulz"], ["Carla Weber"]])
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        mapper,
+        language="de",
+    )
+
+    assert result.new_bytes is not None
+    assert_no_part_contains(result.new_bytes, ["Anna Mueller"])
+    ws = load_workbook(io.BytesIO(result.new_bytes))["Daten"]
+    assert ws["A1"].value == "<<PERSON_1>>"
+    assert ws["A2"].value == "<<PERSON_2>>"
+    # Row 1 and row 5 share the mapper, so a repeat gets the same placeholder.
+    assert mapper.reverse_lookup("<<PERSON_1>>") == "Anna Mueller"
+
+
+async def test_single_row_sheet_is_no_longer_skipped():
+    """``max_row < 2`` used to skip the sheet before classification even ran."""
+    data = _rows_bytes([["Frida Sologne"]], title="Einzeilig")
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(
+        data, SubstringDetector({"Frida Sologne": "PERSON"}), mapper, language="de"
+    )
+
+    assert result.new_bytes is not None
+    assert_no_part_contains(result.new_bytes, ["Frida Sologne"])
+    assert load_workbook(io.BytesIO(result.new_bytes))["Einzeilig"]["A1"].value == "<<PERSON_1>>"
+
+
+async def test_a_recognized_header_row_is_left_alone():
+    """The control: over-redacting headers would be its own kind of damage."""
+    data = _sheet_bytes(
+        ["Name", "Ansprechpartner"],
+        [["Anna Mueller", "Ben Schulz"], ["Carla Weber", "Dora Klein"]],
+    )
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        # A detector that would happily flag the header words too.
+        SubstringDetector({"Name": "PERSON", "Ansprechpartner": "PERSON"}),
+        PseudonymMapper(),
+        language="de",
+    )
+
+    assert result.new_bytes is not None
+    ws = load_workbook(io.BytesIO(result.new_bytes))["Daten"]
+    assert ws["A1"].value == "Name"
+    assert ws["B1"].value == "Ansprechpartner"
+
+
+async def test_an_unrecognized_header_over_unclassified_data_is_left_alone():
+    """ "Betrag" is not in the keyword map and sits over numbers.
+
+    The column never gets classified, so row 1 is not a candidate — a stray NER
+    hit on a lone header word cannot destroy it.
+    """
+    data = _sheet_bytes(["Betrag"], [[10], [20]])
+
+    result = await pseudonymize_xlsx_smart(
+        data, SubstringDetector({"Betrag": "PERSON"}), PseudonymMapper(), language="de"
+    )
+
+    assert result.new_bytes is None  # nothing changed at all
+    assert load_workbook(io.BytesIO(data))["Daten"]["A1"].value == "Betrag"
+
+
+async def test_row_one_data_never_becomes_a_classification_label():
+    """``column_classifications`` is logged, so a data value must not be a key."""
+    data = _rows_bytes([["Anna Mueller"], ["Ben Schulz"]])
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        PseudonymMapper(),
+        language="de",
+    )
+
+    labels = " ".join(result.column_classifications)
+    assert "Anna Mueller" not in labels
+    assert "col1" in result.column_classifications
+    assert result.column_classifications["row1!col1"] == "PERSON (row 1 data)"
+
+
+async def test_row_one_round_trips_through_reveal():
+    data = _rows_bytes([["Anna Mueller"], ["Ben Schulz"]])
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        mapper,
+        language="de",
+    )
+    assert result.new_bytes is not None
+
+    revealed = reidentify_file_bytes(result.new_bytes, _XLSX_MIME, mapper.get_mapping_summary())
+    assert revealed is not None
+    ws = load_workbook(io.BytesIO(revealed))["Daten"]
+    assert ws["A1"].value == "Anna Mueller"
+    assert ws["A2"].value == "Ben Schulz"
+
+
+async def test_detect_mode_counts_row_one_without_writing():
+    data = _rows_bytes([["Anna Mueller"], ["Ben Schulz"]])
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        mapper,
+        language="de",
+        pseudonymize=False,
+    )
+
+    assert result.new_bytes is None
+    assert result.entity_types == {"PERSON": 2}  # row 1 counted, not just row 2
+    assert mapper.get_mapping_summary() == {}
+
+
+async def test_unrecognized_header_over_classified_data_survives_unless_flagged():
+    """The residual case, pinned deliberately.
+
+    "Zustaendig" is not in the keyword map but sits over names, so the column
+    *is* classified and row 1 becomes a candidate. It is rewritten only if the
+    detector flags the header word itself — which is the safe direction, and
+    the reason the candidate rule leans on the column's classification rather
+    than redacting row 1 outright.
+    """
+    data = _sheet_bytes(["Zustaendig"], [["Anna Mueller"], ["Ben Schulz"]])
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        PseudonymMapper(),
+        language="de",
+    )
+
+    assert result.new_bytes is not None
+    ws = load_workbook(io.BytesIO(result.new_bytes))["Daten"]
+    assert ws["A1"].value == "Zustaendig"  # no hit on the word, header intact
+    assert ws["A2"].value == "<<PERSON_1>>"
+    # ... and the header still names the column for the pivot pass.
+    assert result.column_classifications["Zustaendig"] == "PERSON (sampled)"
+
+
+async def test_merged_row_one_does_not_crash():
+    """Merged title rows are common; MergedCell.value is read-only."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws["A1"] = "Akte Anna Mueller"
+    ws.merge_cells("A1:C1")
+    ws.append(["Ben Schulz", "x", "y"])
+    ws.append(["Carla Weber", "x", "y"])
+    wb.properties.creator = ""
+    data = workbook_bytes(wb)
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({"Anna Mueller": "PERSON", "Ben Schulz": "PERSON"}),
+        PseudonymMapper(),
+        language="de",
+    )
+
+    assert result.new_bytes is not None
+    ws_out = load_workbook(io.BytesIO(result.new_bytes))["Daten"]
+    # Only the anchor cell of a merged range holds the value; the rest read None
+    # and are filtered out before any write is attempted.
+    assert ws_out["A1"].value == "Akte <<PERSON_1>>"
+    assert_no_part_contains(result.new_bytes, ["Anna Mueller"])

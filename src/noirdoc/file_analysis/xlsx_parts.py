@@ -25,7 +25,6 @@ index, threaded-comment persons by ordinal. Classifications are logged.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import re
 import zipfile
@@ -39,6 +38,7 @@ import structlog
 from noirdoc.file_analysis.xlsx_inference import (
     DEFAULT_MAX_FREE_TEXTS,
     classify_by_sample,
+    detect_each,
     infer_entity_type,
 )
 
@@ -629,13 +629,7 @@ def _needs_detection(slot: _Slot, mapper: PseudonymMapper) -> bool:
 async def _detect_all(
     texts: list[str], detector: DetectorLike, language: str
 ) -> list[list[DetectedEntity]]:
-    sem = asyncio.Semaphore(_FREE_TEXT_CONCURRENCY)
-
-    async def _one(text: str) -> list[DetectedEntity]:
-        async with sem:
-            return await detector.detect(text, language)
-
-    return await asyncio.gather(*[_one(t) for t in texts])
+    return await detect_each(texts, detector, language, concurrency=_FREE_TEXT_CONCURRENCY)
 
 
 async def _detect_free_texts(
