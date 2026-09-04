@@ -5,6 +5,39 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-04
+
+Security release, and the first one to change behaviour on purpose. Redaction
+now reaches the DOCX surfaces and package parts it never touched — content
+controls, nested tables, text boxes, tracked changes, footnotes/endnotes,
+`docProps`, comment authors, `word/people.xml`, hyperlink text and `mailto:`
+targets — and closes the XLSX surfaces 0.1.3 left open: chart string caches,
+hyperlinks, filter criteria, data validations, pivot captions, and row 1.
+Files that cannot be loaded now fail closed instead of passing the original
+through as "redacted". Recommended for anyone redacting Word or Excel
+documents.
+
+### Breaking
+
+Pinning to `0.1.x` will not pick this up, which is deliberate — each of these
+changes what a caller sees:
+
+- `noirdoc redact -o out.docx` writes `out.txt` when the format could not be
+  preserved, instead of putting UTF-8 text in a `.docx` path. Scripts that
+  expect the requested filename to exist need updating; `RedactionResult`
+  carries `reason`, and the CLI says so on stderr.
+- `Redactor.redact_file` raises `RuntimeError` for an XLSX or DOCX that cannot
+  be loaded, where it used to write the original bytes and report `0 entities`.
+- `pseudonymize_xlsx_smart` raises `XlsxLoadError`, and `pseudonymize_docx_parts`
+  raises `DocxPartsError`, instead of returning an empty result.
+- In the proxy pipeline an unloadable file is an extraction error that blocks
+  the request in pseudonymize and block modes, rather than being forwarded.
+- DOCX output drops tracked deletions, `docProps/thumbnail.jpeg` and
+  `customXml/` items. Deleted tracked text is not reversible.
+- XLSX output differs for the same input where row 1 held data rather than a
+  header, and where any of the newly covered surfaces carried PII.
+- `python-docx` minimum is now `1.2.0`.
+
 ### Security
 - **DOCX: everything outside paragraph runs was invisible to redaction.**
   `extract_docx` walked `doc.paragraphs` and `doc.tables` only, so PII in
@@ -264,7 +297,8 @@ First public alpha on PyPI.
   a `UserWarning`, and keeps working. Explicit `--detector gliner` still fails
   loudly when the `[full]` extra isn't installed.
 
-[Unreleased]: https://github.com/noirdoc-ai/mask-engine/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/noirdoc-ai/mask-engine/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.2.0
 [0.1.3]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.3
 [0.1.2]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.2
 [0.1.1]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.1
