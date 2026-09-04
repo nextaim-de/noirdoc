@@ -3,7 +3,7 @@
 Only a subset of formats support in-place reconstruction:
 
 * **DOCX** – rewrite every text surface through the shared walker in
-  :mod:`noirdoc.file_analysis.docx_parts` (body incl. content controls,
+  :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
   nested tables, text boxes and tracked changes; headers/footers; comments;
   footnotes/endnotes)
 * **XLSX** – replace cell values via ``openpyxl``
@@ -77,7 +77,7 @@ def _reconstruct_plain(block: FileBlock) -> bytes:
 def _reconstruct_docx(block: FileBlock) -> bytes | None:
     """Find-and-replace detected entities across every DOCX text surface.
 
-    Driven by the shared walker in :mod:`noirdoc.file_analysis.docx_parts`,
+    Driven by the shared walker in :mod:`noirdoc.file_analysis.docx_surfaces`,
     which covers the same surfaces :func:`extract_docx` extracts — body
     (content controls, nested tables, text boxes including their
     ``mc:Fallback`` duplicates, tracked insertions), all distinct headers
@@ -88,7 +88,7 @@ def _reconstruct_docx(block: FileBlock) -> bytes | None:
     """
     from docx import Document
 
-    from noirdoc.file_analysis.docx_parts import rewrite_document_texts
+    from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
         doc = Document(io.BytesIO(block.content_bytes))

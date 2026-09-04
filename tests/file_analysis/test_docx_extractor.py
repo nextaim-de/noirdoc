@@ -8,6 +8,7 @@ must not drop inline pictures.
 from __future__ import annotations
 
 import io
+from typing import TYPE_CHECKING
 
 from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.extractors.docx_ext import extract_docx
@@ -24,6 +25,9 @@ from tests.file_analysis.docx_helpers import (
     all_xml,
     docx_bytes,
 )
+
+if TYPE_CHECKING:
+    from docx.text.paragraph import Paragraph
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -325,3 +329,91 @@ def test_reconstruct_docx_preserves_inline_pictures():
 
     rewritten = extract_docx(new_bytes)
     assert "<<PERSON_1>>" in rewritten
+
+
+# ── Issue #16: hyperlinks ────────────────────────────────────────────────
+
+
+def _add_hyperlink(para: Paragraph, text: str, url: str) -> None:
+    """Append a real ``w:hyperlink`` (with one run) to *para*."""
+    from docx.opc.constants import RELATIONSHIP_TYPE
+    from docx.oxml.ns import qn
+    from docx.oxml.parser import OxmlElement
+
+    r_id = para.part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    para._p.append(hyperlink)
+
+
+def test_reconstruct_docx_rewrites_entity_inside_hyperlink():
+    """Issue #16 shape 1: an entity inside a hyperlink must be replaced, not leaked.
+
+    Before the fix the placeholder was prepended to the paragraph while the
+    original address stayed in the hyperlink run — a leak in shipped bytes.
+    """
+    from docx import Document
+
+    doc = Document()
+    footer_para = doc.sections[0].footer.paragraphs[0]
+    footer_para.add_run("Kontakt: ")
+    _add_hyperlink(footer_para, "info@musterfirma.de", "mailto:info@musterfirma.de")
+
+    new_bytes = _redact(docx_bytes(doc), ["info@musterfirma.de"])
+
+    result = Document(io.BytesIO(new_bytes))
+    para = result.sections[0].footer.paragraphs[0]
+    assert para.text == "Kontakt: <<PERSON_1>>"
+    assert b"info@musterfirma.de" not in all_xml(new_bytes).replace(
+        b"mailto:info@musterfirma.de", b""
+    )
+    # The placeholder must live inside the hyperlink itself
+    assert para.hyperlinks[0].text == "<<PERSON_1>>"
+
+
+def test_reconstruct_docx_does_not_duplicate_unrelated_hyperlink():
+    """Issue #16 shape 2: a hyperlink in the same paragraph must not be copied into runs."""
+    from docx import Document
+
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Anna ")
+    para.add_run("Weber (siehe ")
+    _add_hyperlink(para, "www.firma.de", "https://www.firma.de")
+    para.add_run(")")
+
+    new_bytes = _redact(docx_bytes(doc), ["Anna Weber"])
+
+    out = Document(io.BytesIO(new_bytes)).paragraphs[0]
+    assert out.text == "<<PERSON_1>> (siehe www.firma.de)"
+    # Hyperlink text stays in the hyperlink, never in the plain runs
+    assert out.hyperlinks[0].text == "www.firma.de"
+    assert "www.firma.de" not in "".join(run.text for run in out.runs)
+
+
+def test_reconstruct_docx_keeps_breaks_and_tabs():
+    """A rewritten paragraph must keep its w:br / w:tab elements.
+
+    A literal "\\n" or "\\t" inside w:t is whitespace to Word, not a break or
+    a tab stop. The run-based rewrite this replaced got that right for free,
+    because python-docx's Run.text setter re-materializes them.
+    """
+    from docx import Document
+
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Anna Mueller").add_break()
+    para.add_run("Zeile2\tSpalte")
+
+    new_bytes = _redact(docx_bytes(doc), ["Anna Mueller"])
+
+    xml = all_xml(new_bytes)
+    assert b"<w:br/>" in xml
+    assert b"<w:tab/>" in xml
+    assert b"Anna Mueller" not in xml
+    assert extract_docx(new_bytes) == "<<PERSON_1>>\nZeile2\tSpalte"

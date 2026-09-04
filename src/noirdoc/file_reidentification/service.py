@@ -3,7 +3,7 @@
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
 * **DOCX** – every text surface via the shared walker in
-  :mod:`noirdoc.file_analysis.docx_parts` (body incl. content controls,
+  :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
   nested tables, text boxes and tracked changes; headers/footers; comments;
   footnotes/endnotes)
 * **XLSX** – openpyxl cell values plus docProps, comments, headers/footers and
@@ -93,7 +93,7 @@ def _reidentify_docx(
 ) -> bytes | None:
     """Reidentify pseudonyms across every DOCX text surface.
 
-    Uses the shared walker in :mod:`noirdoc.file_analysis.docx_parts` — the
+    Uses the shared walker in :mod:`noirdoc.file_analysis.docx_surfaces` — the
     same one redaction rewrites with — so a pseudonym the redactor could
     place (body incl. content controls, nested tables, text boxes and
     tracked changes; headers/footers; comments; footnotes/endnotes) is also
@@ -101,7 +101,7 @@ def _reidentify_docx(
     """
     from docx import Document
 
-    from noirdoc.file_analysis.docx_parts import rewrite_document_texts
+    from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
         doc = Document(io.BytesIO(file_bytes))

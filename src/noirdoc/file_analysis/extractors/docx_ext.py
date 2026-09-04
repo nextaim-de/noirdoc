@@ -1,7 +1,7 @@
 """DOCX text extraction using python-docx.
 
 Extraction is driven by the shared surface walker in
-:mod:`noirdoc.file_analysis.docx_parts` — the same walker the redaction
+:mod:`noirdoc.file_analysis.docx_surfaces` — the same walker the redaction
 rewrite and the reveal use, so the surfaces the detector sees and the
 surfaces the rewrite touches cannot drift apart.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 
-from noirdoc.file_analysis.docx_parts import extract_document_texts
+from noirdoc.file_analysis.docx_surfaces import extract_document_texts
 from noirdoc.file_analysis.extractors._zip_safety import check_ooxml_zip_safe
 
 

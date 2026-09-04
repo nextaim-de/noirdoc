@@ -1,5 +1,9 @@
 """Shared DOCX text-surface walker feeding extraction, redaction, and reveal.
 
+Named for *text surfaces*, to keep it apart from
+:mod:`noirdoc.file_analysis.docx_parts`, which scrubs the package parts around
+the body (docProps, comment authors, people.xml).
+
 ``extract_docx`` used to walk ``doc.paragraphs`` / ``doc.tables`` through
 python-docx's block-container API, which silently skips every other text
 surface in the package: content controls (``w:sdt``), nested tables, text
@@ -30,15 +34,23 @@ Decisions baked in:
   (non-``mc:Fallback``) branch to avoid double-extraction — the fallback
   duplicates the same content. Rewrites cover *both* branches so the
   fallback cannot leak originals.
+* **Hyperlinks**: a ``w:hyperlink``'s text nodes form their own rewrite
+  segment. The replacement therefore stays inside the link (a redacted
+  address does not leak out of it) and the link's text is never moved into
+  the surrounding runs. Detection still sees the whole paragraph, so an
+  entity is found across the boundary even though it is rewritten per
+  segment.
 * **Inline pictures and other non-text run content**: rewrites only touch
   ``w:t`` / ``w:delText`` nodes, so ``w:drawing`` (and any other run child)
-  survives. In a paragraph that *was* rewritten, ``w:tab`` / ``w:br``
-  elements collapse into literal characters — matching the pre-existing
-  "formatting is simplified on rewrite" v1 behavior.
+  survives. ``w:tab`` / ``w:br`` take part in the replacement as ``\\t`` /
+  ``\\n`` and are re-materialized as elements afterwards — a literal tab or
+  newline inside ``w:t`` is whitespace to Word, not a tab stop or a line
+  break.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -59,6 +71,7 @@ _W_DEL = f"{_W}del"
 _W_TAB = f"{_W}tab"
 _W_BR = f"{_W}br"
 _W_CR = f"{_W}cr"
+_W_HYPERLINK = f"{_W}hyperlink"
 _MC_FALLBACK = f"{_MC}Fallback"
 
 # Node kinds inside a paragraph group.
@@ -68,8 +81,13 @@ _TAB = "tab"
 _BREAK = "br"
 
 _SEPARATOR_CHARS = {_TAB: "\t", _BREAK: "\n"}
+# Inverse, for putting separators back after a rewrite. python-docx's own
+# Run.text setter maps "\r" to w:br too, so a w:cr round-trips as w:br.
+_SEPARATOR_TAGS = {"\t": "w:tab", "\n": "w:br", "\r": "w:br"}
+_SEPARATOR_SPLIT = re.compile(r"([\t\n\r])")
 
-_Group = list[tuple[str, Any]]
+# (kind, element, enclosing w:hyperlink or None)
+_Group = list[tuple[str, Any, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +242,9 @@ def _under_fallback(element: Any, root: Any) -> bool:
     return False
 
 
-def _collect_own_nodes(element: Any, group: _Group, *, include_fallback: bool) -> None:
+def _collect_own_nodes(
+    element: Any, group: _Group, *, include_fallback: bool, link: Any = None
+) -> None:
     for child in element:
         tag = child.tag
         if tag == _W_P:
@@ -234,21 +254,28 @@ def _collect_own_nodes(element: Any, group: _Group, *, include_fallback: bool) -
         if tag == _MC_FALLBACK and not include_fallback:
             continue
         if tag == _W_T:
-            group.append((_TEXT, child))
+            group.append((_TEXT, child, link))
         elif tag == _W_DELTEXT:
-            group.append((_DELETED, child))
+            group.append((_DELETED, child, link))
         elif tag == _W_TAB:
-            group.append((_TAB, child))
+            group.append((_TAB, child, link))
         elif tag in (_W_BR, _W_CR):
-            group.append((_BREAK, child))
+            group.append((_BREAK, child, link))
         else:
-            _collect_own_nodes(child, group, include_fallback=include_fallback)
+            _collect_own_nodes(
+                child,
+                group,
+                include_fallback=include_fallback,
+                # Everything under a w:hyperlink is tagged with it, so the
+                # rewrite can keep the link's text inside the link.
+                link=child if tag == _W_HYPERLINK else link,
+            )
 
 
 def _visible_text(group: _Group) -> str:
     """The paragraph's visible text: ``w:t`` runs with tab/break separators."""
     chunks: list[str] = []
-    for kind, element in group:
+    for kind, element, _link in group:
         if kind == _TEXT:
             chunks.append(element.text or "")
         elif kind in _SEPARATOR_CHARS:
@@ -258,7 +285,7 @@ def _visible_text(group: _Group) -> str:
 
 def _deleted_text(group: _Group) -> str:
     """The paragraph's tracked-deleted text (``w:delText`` nodes)."""
-    return "".join(element.text or "" for kind, element in group if kind == _DELETED)
+    return "".join(element.text or "" for kind, element, _link in group if kind == _DELETED)
 
 
 # ---------------------------------------------------------------------------
@@ -284,33 +311,78 @@ def _rewrite_root(root: Any, transform: Callable[[str], str]) -> bool:
     return changed
 
 
+def _link_segments(group: _Group) -> list[_Group]:
+    """Split a paragraph group at ``w:hyperlink`` boundaries.
+
+    Consecutive nodes outside any link form one segment; each hyperlink's own
+    nodes form their own. Rewriting per segment keeps a replacement inside the
+    link it came from (so a redacted address cannot survive in the link run)
+    and keeps the link's text out of the surrounding runs.
+    """
+    segments: list[_Group] = []
+    current: _Group = []
+    current_link: Any = None
+    for entry in group:
+        if entry[2] is not current_link:
+            if current:
+                segments.append(current)
+            current = []
+            current_link = entry[2]
+        current.append(entry)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _write_text_with_separators(element: Any, text: str) -> None:
+    """Write *text* into the ``w:t`` *element*, re-materializing tabs and breaks.
+
+    A literal ``\\t`` or ``\\n`` inside ``w:t`` is whitespace to Word, not a tab
+    stop or a line break. python-docx's ``Run.text`` setter expands them into
+    ``w:tab`` / ``w:br``, which is why the run-based rewrite this replaced kept
+    them for free. Do the same, inserting the extra elements as siblings so the
+    rest of the run — an inline ``w:drawing``, say — is untouched.
+    """
+    from docx.oxml.parser import OxmlElement
+
+    pieces = _SEPARATOR_SPLIT.split(text)
+    element.text = pieces[0]
+    element.set(_XML_SPACE, "preserve")
+    parent = element.getparent()
+    if parent is None or len(pieces) == 1:
+        return
+
+    at = parent.index(element)
+    for piece in pieces[1:]:
+        tag = _SEPARATOR_TAGS.get(piece)
+        if tag is not None:
+            node = OxmlElement(tag)
+        elif piece:
+            node = OxmlElement("w:t")
+            node.text = piece
+            node.set(_XML_SPACE, "preserve")
+        else:
+            continue
+        at += 1
+        parent.insert(at, node)
+
+
 def _rewrite_group(group: _Group, transform: Callable[[str], str]) -> bool:
     """Rewrite one paragraph's text nodes; return ``True`` if anything changed.
 
-    The transformed visible text lands in the first ``w:t``; the remaining
-    ``w:t`` are blanked and separator elements removed (their characters are
-    part of the rewritten text). Non-text run content — ``w:drawing`` inline
-    pictures in particular — is left untouched. ``w:delText`` nodes are
-    transformed individually, never merged into visible text.
+    The paragraph is rewritten one hyperlink segment at a time. Within a
+    segment the transformed text lands in the first ``w:t`` (with tabs and
+    breaks re-materialized as elements) and the remaining ``w:t`` are blanked.
+    Non-text run content — ``w:drawing`` inline pictures in particular — is
+    left untouched. ``w:delText`` nodes are transformed individually, never
+    merged into visible text.
     """
     changed = False
-    text_nodes = [element for kind, element in group if kind == _TEXT]
-    visible = _visible_text(group)
-    new_text = transform(visible)
-    if new_text != visible and text_nodes:
-        first = text_nodes[0]
-        first.text = new_text
-        first.set(_XML_SPACE, "preserve")
-        for element in text_nodes[1:]:
-            element.text = ""
-        for kind, element in group:
-            if kind in _SEPARATOR_CHARS:
-                parent = element.getparent()
-                if parent is not None:
-                    parent.remove(element)
-        changed = True
+    for segment in _link_segments(group):
+        if _rewrite_segment(segment, transform):
+            changed = True
 
-    for kind, element in group:
+    for kind, element, _link in group:
         if kind == _DELETED and element.text:
             new_deleted = transform(element.text)
             if new_deleted != element.text:
@@ -318,6 +390,26 @@ def _rewrite_group(group: _Group, transform: Callable[[str], str]) -> bool:
                 element.set(_XML_SPACE, "preserve")
                 changed = True
     return changed
+
+
+def _rewrite_segment(segment: _Group, transform: Callable[[str], str]) -> bool:
+    text_nodes = [element for kind, element, _link in segment if kind == _TEXT]
+    visible = _visible_text(segment)
+    new_text = transform(visible)
+    if new_text == visible or not text_nodes:
+        return False
+
+    # Old separator elements are dropped; _write_text_with_separators puts the
+    # ones the rewritten text still calls for back next to the first w:t.
+    for kind, element, _link in segment:
+        if kind in _SEPARATOR_CHARS:
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+    _write_text_with_separators(text_nodes[0], new_text)
+    for element in text_nodes[1:]:
+        element.text = ""
+    return True
 
 
 def _strip_tracked_deletions(root: Any) -> bool:
