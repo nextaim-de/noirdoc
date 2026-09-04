@@ -247,16 +247,21 @@ class Redactor:
         # sampling + cell-level pseudonymization. The generic flat-text path destroys cell
         # context and misses many entities — see xlsx_inference.pseudonymize_xlsx_smart.
         if mime == _XLSX_MIME:
-            from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+            from noirdoc.file_analysis.xlsx_inference import XlsxLoadError, pseudonymize_xlsx_smart
 
             detector = await self._ensure_detector()
-            xr = await pseudonymize_xlsx_smart(
-                content,
-                detector,
-                self._mapper,
-                language=language,
-                pseudonymize=True,
-            )
+            try:
+                xr = await pseudonymize_xlsx_smart(
+                    content,
+                    detector,
+                    self._mapper,
+                    language=language,
+                    pseudonymize=True,
+                )
+            except XlsxLoadError as exc:
+                # Fail closed, mirroring the generic path's extraction failure:
+                # never return the original bytes as if they were redacted.
+                raise RuntimeError(f"XLSX analysis failed for {path.name}: {exc}") from exc
             self._persist()
             return RedactionResult(
                 input_path=path,
