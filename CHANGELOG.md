@@ -5,6 +5,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Docs: all repo URLs now point at `noirdoc-ai/mask-engine` (was
+  `nextaim-de/noirdoc`); `CONTRIBUTING.md` rewritten for the uv + Makefile
+  workflow (was Poetry); `docs/RELEASING.md` notes that a repo move requires
+  re-registering the Trusted Publisher on both indexes. ([#12])
+
+[#12]: https://github.com/noirdoc-ai/mask-engine/issues/12
+
 ### Fixed
 - **Plain-text fallback is now visible.** When DOCX/XLSX reconstruction fails
   (or the format never supported it, e.g. PDF), `noirdoc redact` no longer
@@ -138,9 +146,9 @@ proxy. Recommended upgrade for anyone running 0.1.x.
   transcripts and audit logs; original values never appear in the output.
   Companion to `ns show`. ([#1], [#2])
 
-[#1]: https://github.com/nextaim-de/noirdoc/issues/1
-[#2]: https://github.com/nextaim-de/noirdoc/pull/2
-[#3]: https://github.com/nextaim-de/noirdoc/pull/3
+[#1]: https://github.com/noirdoc-ai/mask-engine/issues/1
+[#2]: https://github.com/noirdoc-ai/mask-engine/pull/2
+[#3]: https://github.com/noirdoc-ai/mask-engine/pull/3
 
 ## [0.1.0] — 2026-04-24
 
@@ -175,6 +183,6 @@ First public alpha on PyPI.
 
 [Unreleased]: https://github.com/noirdoc-ai/mask-engine/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.3
-[0.1.2]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.2
-[0.1.1]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.1
-[0.1.0]: https://github.com/nextaim-de/noirdoc/releases/tag/v0.1.0
+[0.1.2]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.2
+[0.1.1]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.1
+[0.1.0]: https://github.com/noirdoc-ai/mask-engine/releases/tag/v0.1.0

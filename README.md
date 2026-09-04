@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/nextaim-de/noirdoc/main/docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
+  <img src="https://raw.githubusercontent.com/noirdoc-ai/mask-engine/main/docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
 </p>
 
 <p align="center">
-  <a href="https://github.com/nextaim-de/noirdoc/actions/workflows/ci.yml"><img src="https://github.com/nextaim-de/noirdoc/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/noirdoc-ai/mask-engine/actions/workflows/ci.yml"><img src="https://github.com/noirdoc-ai/mask-engine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python 3.12 | 3.13">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT">
   <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen" alt="pre-commit enabled"></a>
@@ -121,7 +121,7 @@ If you're working with German legal, medical, HR, or financial documents, this i
 | Plain text / CSV / MD / HTML | ✓      | ✓                   |
 | PPTX / images                | ✓      | ✗ (pass-through)    |
 
-PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md).
+PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CONTRIBUTING.md).
 
 ## Advanced: shared mapping storage
 
@@ -167,19 +167,19 @@ Run `make help` for the full list of targets (also: `make lint`, `make fmt`, `ma
 
 ## Contributing
 
-Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
+Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
 
 ## Security
 
-Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](https://github.com/nextaim-de/noirdoc/blob/main/SECURITY.md). Please don't open public issues for security bugs.
+Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](https://github.com/noirdoc-ai/mask-engine/blob/main/SECURITY.md). Please don't open public issues for security bugs.
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
+See [CHANGELOG.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
 
 ## License
 
-MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](https://github.com/nextaim-de/noirdoc/blob/main/LICENSE).
+MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](https://github.com/noirdoc-ai/mask-engine/blob/main/LICENSE).
 
 ---
 
