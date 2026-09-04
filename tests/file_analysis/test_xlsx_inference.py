@@ -297,3 +297,72 @@ async def test_chartsheet_is_skipped_by_the_cell_pass_and_its_header_scrubbed():
     back = load_workbook(io.BytesIO(revealed))
     assert back["Daten"]["A2"].value == "Anna Mueller"
     assert back["Chart"].oddHeader.left.text == "Erstellt von Anna Mueller"
+
+
+# ── issue #11: bound the free-text NER cost in detect/block modes ──
+
+
+async def test_block_mode_cell_hit_skips_part_free_text_scan():
+    """A cell-grid hit settles the block decision — comment NER is skipped but reported."""
+    from openpyxl.comments import Comment
+
+    from noirdoc.detection.base import DetectedEntity
+
+    calls: list[str] = []
+
+    class CountingDetector(SubstringDetector):
+        async def detect(self, text: str, language: str = "de") -> list[DetectedEntity]:
+            calls.append(text)
+            return await super().detect(text, language)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.append(["Name", "Betrag"])
+    ws.append(["Anna Mueller", 10])
+    # A threaded-mirror author is excluded from author handling — the only other
+    # entity is the cell hit, so the skip below must come from the cell short-circuit.
+    ws["B2"].comment = Comment(
+        "Geheimnotiz Ben Schulz", "tc={5F7A1C2E-9B3D-4E6F-8A1B-2C3D4E5F6A7B}"
+    )
+    wb.properties.creator = ""  # absent creator: no deterministic author hit
+    data = workbook_bytes(wb)
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        CountingDetector({"Ben Schulz": "PERSON"}),
+        PseudonymMapper(),
+        language="de",
+        pseudonymize=False,
+        stop_on_first_hit=True,
+    )
+
+    assert calls == []  # the Name column is classified by header keyword, no NER at all
+    assert result.entity_count == 1
+    assert result.free_texts_skipped == 1
+    assert result.new_bytes is None
+
+
+async def test_detect_mode_cap_is_surfaced_on_result():
+    from openpyxl.comments import Comment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.append(["Betrag"])
+    ws.append([10])
+    for row in (2, 3, 4):
+        ws.cell(row=row, column=2).comment = Comment(f"Kommentar {row}", "")
+    wb.properties.creator = ""
+    data = workbook_bytes(wb)
+
+    result = await pseudonymize_xlsx_smart(
+        data,
+        SubstringDetector({}),
+        PseudonymMapper(),
+        language="de",
+        pseudonymize=False,
+        max_free_texts=2,
+    )
+
+    assert result.free_texts_skipped == 1

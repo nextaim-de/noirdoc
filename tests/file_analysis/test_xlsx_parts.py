@@ -671,3 +671,107 @@ def test_walker_does_not_materialize_the_grid():
     list(iter_text_slots(wb))
 
     assert len(ws._cells) == before
+
+
+# ── issue #11: bound the free-text NER cost in detect/block modes ──
+
+
+class _CountingDetector(SubstringDetector):
+    """SubstringDetector that records every text it is asked to scan."""
+
+    def __init__(self, table: dict[str, str]) -> None:
+        super().__init__(table)
+        self.calls: list[str] = []
+
+    async def detect(self, text: str, language: str = "de") -> list[DetectedEntity]:
+        self.calls.append(text)
+        return await super().detect(text, language)
+
+
+def _comments(wb: Workbook, texts: list[str], *, start_row: int = 2) -> None:
+    for offset, text in enumerate(texts):
+        wb["Daten"].cell(row=start_row + offset, column=3).comment = Comment(text, "")
+
+
+async def test_free_text_cap_limits_detect_scan_and_reports_skipped():
+    wb = _workbook()
+    _comments(wb, [f"Notiz {i}: Anna Mueller" for i in range(5)])
+    detector = _CountingDetector({"Anna Mueller": "PERSON"})
+
+    result = await pseudonymize_workbook_parts(
+        wb, detector, PseudonymMapper(), "de", apply=False, max_free_texts=3
+    )
+
+    assert len(detector.calls) == 3
+    assert result.free_texts_skipped == 2
+    # 2 forced authors + 3 scanned comments; the 2 unscanned ones are reported, not counted.
+    assert result.entity_types == {"PERSON": 5}
+
+
+async def test_block_mode_stops_free_text_scan_at_first_hit():
+    wb = _workbook()
+    wb.properties.creator = None
+    wb.properties.lastModifiedBy = None
+    _comments(wb, ["Anna Mueller bittet um Freigabe"] + [f"harmlos {i}" for i in range(20)])
+    detector = _CountingDetector({"Anna Mueller": "PERSON"})
+
+    result = await pseudonymize_workbook_parts(
+        wb, detector, PseudonymMapper(), "de", apply=False, stop_on_first_hit=True
+    )
+
+    # One concurrency chunk (8) is in flight when the hit lands; the rest is skipped.
+    assert len(detector.calls) == 8
+    assert result.free_texts_skipped == 13
+    assert result.entity_count == 1
+
+
+async def test_block_mode_author_hit_needs_no_ner_at_all():
+    wb = _workbook()  # creator/lastModifiedBy are set — a guaranteed hit
+    _comments(wb, [f"Notiz {i}" for i in range(4)])
+    detector = _CountingDetector({})
+
+    result = await pseudonymize_workbook_parts(
+        wb, detector, PseudonymMapper(), "de", apply=False, stop_on_first_hit=True
+    )
+
+    assert detector.calls == []
+    assert result.free_texts_skipped == 4
+    assert result.entity_count >= 1
+
+
+async def test_redact_mode_ignores_cap_and_early_exit():
+    """Fail-safe: a capped redact pass would forward unmasked text — apply=True scans all."""
+    wb = _workbook()
+    texts = [f"Notiz {i}: Anna Mueller" for i in range(4)]
+    _comments(wb, texts)
+    detector = _CountingDetector({"Anna Mueller": "PERSON"})
+    mapper = PseudonymMapper()
+
+    result = await pseudonymize_workbook_parts(
+        wb, detector, mapper, "de", apply=True, max_free_texts=1, stop_on_first_hit=True
+    )
+
+    assert len(detector.calls) == 4
+    assert result.free_texts_skipped == 0
+    placeholder = mapper.get_or_create("Anna Mueller", "PERSON")
+    for offset in range(4):
+        comment = wb["Daten"].cell(row=2 + offset, column=3).comment
+        assert comment.text == f"Notiz {offset}: {placeholder}"
+    wb["Daten"]["A2"] = placeholder  # the cell grid is the sheet pass's job, not this one's
+    assert_no_part_contains(workbook_bytes(wb), ["Anna Mueller"])
+
+
+async def test_texts_beyond_cap_are_reported_not_silently_dropped():
+    wb = _workbook()
+    wb.properties.creator = None
+    wb.properties.lastModifiedBy = None
+    _comments(wb, ["harmlos", "Anna Mueller"])
+    detector = _CountingDetector({"Anna Mueller": "PERSON"})
+
+    result = await pseudonymize_workbook_parts(
+        wb, detector, PseudonymMapper(), "de", apply=False, max_free_texts=1
+    )
+
+    # The PII sits beyond the cap: zero hits is only honest with the skip count.
+    assert result.entity_count == 0
+    assert result.free_texts_skipped == 1
