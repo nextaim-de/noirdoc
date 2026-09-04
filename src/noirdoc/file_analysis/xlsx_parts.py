@@ -286,13 +286,26 @@ class PartsResult:
     # exit; detect/block modes only). Callers must surface this — a partial scan
     # is only acceptable when it is reported.
     free_texts_skipped: int = 0
+    # Whole parts removed because they cannot be pseudonymized — a rendered
+    # thumbnail of the original page, an opaque customXml island. These are NOT
+    # PII findings: a document can carry them and contain nothing sensitive at
+    # all, and many templates do. Kept out of ``entity_types`` so they never
+    # inflate an entity count or trigger a block; reported so the drop is visible.
+    dropped_parts: dict[str, int] = field(default_factory=dict)
 
     @property
     def entity_count(self) -> int:
         return sum(self.entity_types.values())
 
+    @property
+    def dropped_count(self) -> int:
+        return sum(self.dropped_parts.values())
+
     def _add(self, entity_type: str, count: int = 1) -> None:
         self.entity_types[entity_type] = self.entity_types.get(entity_type, 0) + count
+
+    def _add_dropped(self, kind: str, count: int = 1) -> None:
+        self.dropped_parts[kind] = self.dropped_parts.get(kind, 0) + count
 
 
 def _header_footer_slots(sheet: Any, where: str) -> Iterator[_Slot]:

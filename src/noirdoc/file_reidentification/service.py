@@ -5,7 +5,8 @@ Replaces <<TYPE_N>> tokens with original values in supported formats:
 * **DOCX** – every text surface via the shared walker in
   :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
   nested tables, text boxes and tracked changes; headers/footers; comments;
-  footnotes/endnotes)
+  footnotes/endnotes), plus the package parts (docProps, comment authors,
+  ``word/people.xml``) via :mod:`noirdoc.file_analysis.docx_parts`
 * **XLSX** – openpyxl cell values plus every part-level surface enumerated by
   :mod:`noirdoc.file_analysis.xlsx_parts` (docProps, comments, headers/footers,
   pivot caches and table captions, chart caches/titles, hyperlinks, filter and
@@ -93,16 +94,18 @@ def _reidentify_text(
 def _reidentify_docx(
     file_bytes: bytes, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bytes | None:
-    """Reidentify pseudonyms across every DOCX text surface.
+    """Reidentify pseudonyms across every DOCX text surface and package part.
 
-    Uses the shared walker in :mod:`noirdoc.file_analysis.docx_surfaces` — the
-    same one redaction rewrites with — so a pseudonym the redactor could
-    place (body incl. content controls, nested tables, text boxes and
-    tracked changes; headers/footers; comments; footnotes/endnotes) is also
-    found on reveal.
+    Both walkers are the ones the redact side writes through, so neither pair
+    can drift apart: :mod:`noirdoc.file_analysis.docx_surfaces` for the text
+    (body incl. content controls, nested tables, text boxes and tracked
+    changes; headers/footers; comments; footnotes/endnotes), and
+    :mod:`noirdoc.file_analysis.docx_parts` for the package parts (docProps,
+    comment authors/initials, ``word/people.xml``).
     """
     from docx import Document
 
+    from noirdoc.file_analysis.docx_parts import reidentify_document_parts
     from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
@@ -116,7 +119,11 @@ def _reidentify_docx(
             return text
         return engine.reidentify(text, mapper)
 
-    if not rewrite_document_texts(doc, transform, strip_deleted=False):
+    changed = rewrite_document_texts(doc, transform, strip_deleted=False)
+    if reidentify_document_parts(doc, engine, mapper):
+        changed = True
+
+    if not changed:
         return file_bytes
 
     buf = io.BytesIO()
