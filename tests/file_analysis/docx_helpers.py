@@ -379,3 +379,37 @@ def inject_custom_xml(data: bytes, *, xml_text: str) -> bytes:
             )
         ],
     )
+
+
+def add_hyperlink(para: object, text: str, url: str) -> None:
+    """Append a real external ``w:hyperlink`` (one run) to *para*.
+
+    python-docx can read hyperlinks but not create them, so the element and
+    its relationship are built by hand.
+    """
+    from docx.opc.constants import RELATIONSHIP_TYPE
+    from docx.oxml.ns import qn
+    from docx.oxml.parser import OxmlElement
+
+    r_id = para.part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)  # type: ignore[attr-defined]
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    para._p.append(hyperlink)  # type: ignore[attr-defined]
+
+
+def hyperlink_targets(data: bytes) -> list[str]:
+    """Every external hyperlink ``Target`` in the package, sorted."""
+    targets = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".rels"):
+                continue
+            for fragment in zf.read(name).decode().split("<Relationship")[1:]:
+                if "/hyperlink" in fragment and 'Target="' in fragment:
+                    targets.append(fragment.split('Target="')[1].split('"')[0])
+    return sorted(targets)

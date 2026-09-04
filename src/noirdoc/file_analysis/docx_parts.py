@@ -6,8 +6,10 @@ redacted document still leaked: ``docProps/core.xml`` (creator,
 lastModifiedBy, title, …), ``docProps/app.xml`` (Manager, Company, the
 TitlesOfParts heading cache), ``docProps/custom.xml``, comment ``w:author`` /
 ``w:initials``, ``word/people.xml`` (modern comment identities incl. AD
-userIds), the ``docProps/thumbnail.jpeg`` preview of the *original* page, and
-``customXml/`` data islands.
+userIds), the ``docProps/thumbnail.jpeg`` preview of the *original* page,
+``customXml/`` data islands, and the ``mailto:`` targets of hyperlink
+relationships — the address a redacted footer link still pointed at even once
+its display text read ``<<EMAIL_1>>``.
 
 Design mirrors :mod:`noirdoc.file_analysis.xlsx_parts`: **one** slot
 enumerator (:func:`iter_text_slots`) feeds **both** directions —
@@ -43,6 +45,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import quote, unquote
 
 import structlog
 
@@ -102,6 +105,8 @@ _SCRUBBED_PARTNAMES = (_APP_PARTNAME, _CUSTOM_PARTNAME, _PEOPLE_PARTNAME)
 
 _THUMBNAIL_RELTYPE_SUFFIX = "/metadata/thumbnail"
 _CUSTOM_XML_RELTYPE_SUFFIX = "/customXml"
+_HYPERLINK_RELTYPE_SUFFIX = "/hyperlink"
+_MAILTO = "mailto:"
 
 SlotKind = Literal["author", "org", "free"]
 
@@ -176,6 +181,69 @@ class _ElementAttr:
     def value(self, new: str) -> None:
         self._elem.set(self._qname, new)
         self._xml.flush()
+
+
+class _MailtoTarget:
+    """An external hyperlink's ``mailto:`` target, exposed as its plain address.
+
+    Mirrors :class:`noirdoc.file_analysis.xlsx_parts._MailtoTarget`. ``<`` and
+    ``>`` are illegal URI characters, so a raw ``<<EMAIL_1>>`` in a
+    relationship ``Target`` would risk Word's repair prompt; the placeholder is
+    percent-encoded on write (``mailto:%3C%3CEMAIL_1%3E%3E`` — RFC 6068 allows
+    percent-encoding in mailto URIs) and decoded again by the getter, so redact
+    and reveal both see the plain placeholder.
+
+    A target carrying a query (``?subject=…``) is mapped whole rather than
+    split: the query can hold PII of its own, and mapping the whole string
+    keeps the round-trip exact. The common query-less case decodes to the bare
+    address, so it shares the placeholder the link *text* already got.
+
+    python-docx exposes ``target_ref`` read-only; ``_target`` is the only
+    writable handle for an external relationship.
+    """
+
+    def __init__(self, rel: Any) -> None:
+        self._rel = rel
+
+    @property
+    def address(self) -> str | None:
+        target = self._rel.target_ref
+        if isinstance(target, str) and target.lower().startswith(_MAILTO):
+            return unquote(target[len(_MAILTO) :])
+        return None
+
+    @address.setter
+    def address(self, value: str) -> None:
+        # "@?=&" keeps the address and any ?subject= query structure intact.
+        self._rel._target = _MAILTO + quote(value, safe="@?=&")
+
+
+def _hyperlink_slots(doc: DocumentObject) -> Iterator[_Slot]:
+    """``mailto:`` targets of every external hyperlink relationship.
+
+    The address lives in ``word/_rels/*.rels``, not in the body, so the text
+    rewrite never reaches it: a redacted footer whose link text is already
+    ``<<EMAIL_1>>`` still carried ``mailto:info@musterfirma.de`` verbatim —
+    one ``unzip -p`` away in a shipped document.
+
+    Headers, footers, comments and the notes parts each own their rels, so the
+    whole package is walked rather than just ``document.xml``. Non-``mailto:``
+    targets are left alone: an ``https`` URL is not reliably PII and rewriting
+    it would break the link.
+    """
+    package = doc.part.package
+    for part in package.iter_parts():
+        # Part names are structural OPC paths (``word/footer1.xml``), not
+        # file-provided text, so they are safe to report as a surface.
+        where = str(part.partname).lstrip("/")
+        for rid in sorted(part.rels):
+            rel = part.rels[rid]
+            if not rel.is_external or not rel.reltype.endswith(_HYPERLINK_RELTYPE_SUFFIX):
+                continue
+            target = _MailtoTarget(rel)
+            if target.address is None:
+                continue  # https, file, anchor — not an address we can map
+            yield _Slot(f"hyperlink.mailto@{where}!{rid}", "author", target, "address")
 
 
 def _find_scrubbed_parts(doc: DocumentObject) -> list[tuple[str, Any]]:
@@ -268,6 +336,10 @@ def iter_text_slots(doc: DocumentObject) -> Iterator[_Slot]:
         yield _Slot(f"comment{cid}.author", "author", comment, "author")
         # Initials duplicate the author identity; mapped, but not counted twice.
         yield _Slot(f"comment{cid}.initials", "author", comment, "initials", count=False)
+
+    # After the comment authors, so the body pass and these have already taught
+    # the mapper an address that also appears as link text.
+    yield from _hyperlink_slots(doc)
 
     for name, part in _find_scrubbed_parts(doc):
         xml = _parse_part(name, part)
