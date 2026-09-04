@@ -326,6 +326,7 @@ async def handle_redact(
                     entity_types=file_result.entity_types,
                     mime_type=file_result.mime_type,
                     reconstructed=file_result.reconstructed,
+                    reason=file_result.reason,
                     namespace_size=redactor.mapper.entity_count,
                 )
 

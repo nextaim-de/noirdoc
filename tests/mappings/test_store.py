@@ -71,7 +71,11 @@ async def test_data_is_encrypted(store, fake_redis, mapper_with_data):
     request_id = uuid.uuid4()
     await store.save(request_id=request_id, tenant_id=uuid.uuid4(), mapper=mapper_with_data)
     raw = await fake_redis.get(f"mapping:{request_id}")
-    assert b"Max" not in raw
+    # Assert on the whole values, not a 3-byte prefix: the token is base64url,
+    # so a short needle turns up in random ciphertext by chance (b"Max" did,
+    # in CI, once). Full values make the collision probability negligible.
+    for original in ("Max Müller", "max@test.de"):
+        assert original.encode() not in raw
     assert raw.startswith(b"gAAAAA")  # Fernet token prefix
 
 

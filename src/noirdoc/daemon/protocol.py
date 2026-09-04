@@ -76,6 +76,11 @@ class RedactResult(BaseModel):
     entity_types: dict[str, int]
     mime_type: str | None = None
     reconstructed: bool = False
+    # Why the original format was not preserved; set when reconstructed is
+    # False for a file input. Optional with a default so older clients that
+    # don't know the field keep working (the hello handshake already forces
+    # a daemon respawn on any version mismatch).
+    reason: str | None = None
     namespace_size: int | None = None
 
 
