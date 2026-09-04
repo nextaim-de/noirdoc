@@ -26,6 +26,16 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   page) and `customXml/` data islands cannot be pseudonymized and are dropped
   on write; they are reported separately from the entity count, since carrying
   them says nothing about whether a document holds PII. ([#14])
+- **DOCX: a redacted hyperlink still pointed at the real address.** The
+  display text was rewritten, but the address itself lives in
+  `word/_rels/*.rels` — one `unzip -p` away in a shipped document, and German
+  business letters almost always carry a hyperlinked address in the footer.
+  Every external `mailto:` relationship, in every part (document, headers,
+  footers, comments, notes), is now mapped through the shared mapper and
+  percent-encoded into the target (`mailto:%3C%3CEMAIL_1%3E%3E`, since `<` and
+  `>` are illegal URI characters), so it reuses the placeholder the link text
+  already got and reveals back to the original. Non-`mailto:` targets are left
+  alone. ([#27])
 - **DOCX: an entity inside a hyperlink was left in the link.** The rewrite read
   `para.text` (which includes hyperlink text) but wrote back through
   `para.runs` (which does not), so the placeholder was prepended while the

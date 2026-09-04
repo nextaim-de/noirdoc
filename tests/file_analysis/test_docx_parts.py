@@ -14,7 +14,9 @@ import pytest
 from docx import Document
 from docx.document import Document as DocumentObject
 
+from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.docx_parts import DocxPartsError, pseudonymize_docx_parts
+from noirdoc.file_analysis.extractors.docx_ext import extract_docx
 from noirdoc.file_analysis.models import FileBlock
 from noirdoc.file_analysis.reconstruction import reconstruct
 from noirdoc.file_analysis.xlsx_parts import PartsResult
@@ -23,8 +25,10 @@ from noirdoc.pseudonymization.engine import PseudonymizationEngine
 from noirdoc.pseudonymization.mapper import PseudonymMapper
 from tests.file_analysis.docx_helpers import (
     DOCX_MIME,
+    add_hyperlink,
     clean_document_bytes,
     document_bytes,
+    hyperlink_targets,
     inject_app_props,
     inject_custom_props,
     inject_custom_xml,
@@ -438,3 +442,155 @@ async def test_unloadable_package_raises_instead_of_silently_skipping():
         await pseudonymize_docx_parts(
             b"PK\x03\x04 not a real package", SubstringDetector({}), PseudonymMapper(), "de"
         )
+
+
+# ── hyperlink mailto: targets (issue #27) ────────────────
+
+
+async def test_mailto_targets_scrubbed_in_every_part():
+    """The address lives in the rels, which the body rewrite never reaches."""
+    doc = _doc()
+    body = doc.add_paragraph()
+    body.add_run("Schreiben an ")
+    add_hyperlink(body, "anna@example.de", "mailto:anna@example.de")
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.add_run("Kontakt: ")
+    add_hyperlink(footer, "info@musterfirma.de", "mailto:info@musterfirma.de")
+    data = clean_document_bytes(doc)
+    assert hyperlink_targets(data) == [
+        "mailto:anna@example.de",
+        "mailto:info@musterfirma.de",
+    ]
+
+    new_bytes, result, mapper = await _redact(data)
+
+    assert new_bytes is not None
+    # Both parts are covered — document.xml and footer1.xml own separate rels.
+    assert hyperlink_targets(new_bytes) == [
+        "mailto:%3C%3CEMAIL_1%3E%3E",
+        "mailto:%3C%3CEMAIL_2%3E%3E",
+    ]
+    # This pass owns the rels only; the display text is the body pass's job,
+    # which the end-to-end test below covers.
+    assert result.entity_types == {"EMAIL": 2}
+    assert mapper.reverse_lookup("<<EMAIL_1>>") == "anna@example.de"
+    assert mapper.reverse_lookup("<<EMAIL_2>>") == "info@musterfirma.de"
+
+
+async def test_mailto_target_reuses_the_placeholder_the_link_text_got():
+    """A footer link and its target must not end up with different placeholders."""
+    doc = _doc()
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.add_run("Kontakt: ")
+    add_hyperlink(footer, "info@musterfirma.de", "mailto:info@musterfirma.de")
+    data = clean_document_bytes(doc)
+
+    # The body pass runs first and maps the display text, exactly as the SDK
+    # and the pipeline order it.
+    mapper = PseudonymMapper()
+    text_placeholder = mapper.get_or_create("info@musterfirma.de", "EMAIL")
+
+    new_bytes, _result, _mapper = await _redact(data, mapper=mapper)
+
+    assert new_bytes is not None
+    assert text_placeholder == "<<EMAIL_1>>"
+    assert hyperlink_targets(new_bytes) == ["mailto:%3C%3CEMAIL_1%3E%3E"]
+
+
+async def test_non_mailto_targets_left_alone():
+    """An https URL is not reliably PII, and rewriting it would break the link."""
+    doc = _doc()
+    para = doc.add_paragraph()
+    add_hyperlink(para, "Website", "https://www.musterfirma.de/impressum")
+    data = clean_document_bytes(doc)
+
+    new_bytes, result, _mapper = await _redact(data)
+
+    assert new_bytes is None  # nothing to change
+    assert result.entity_types == {}
+    assert hyperlink_targets(data) == ["https://www.musterfirma.de/impressum"]
+
+
+async def test_mailto_target_with_a_query_round_trips():
+    """A ?subject= query can hold PII of its own, so the whole target is mapped."""
+    doc = _doc()
+    para = doc.add_paragraph()
+    add_hyperlink(para, "Anfrage", "mailto:info@musterfirma.de?subject=Akte Anna Mueller")
+    data = clean_document_bytes(doc)
+
+    new_bytes, _result, mapper = await _redact(data)
+
+    assert new_bytes is not None
+    assert_no_part_contains(new_bytes, ["info@musterfirma.de", "Anna Mueller"])
+    revealed = reidentify_file_bytes(new_bytes, DOCX_MIME, mapper.get_mapping_summary())
+    assert revealed is not None
+    # Spaces come back percent-encoded: the getter decodes and the setter
+    # re-encodes, so a target that was not valid URI syntax to begin with is
+    # normalized. The address itself round-trips byte for byte.
+    assert hyperlink_targets(revealed) == [
+        "mailto:info@musterfirma.de?subject=Akte%20Anna%20Mueller"
+    ]
+
+
+async def test_reveal_restores_the_plain_target():
+    doc = _doc()
+    footer = doc.sections[0].footer.paragraphs[0]
+    add_hyperlink(footer, "info@musterfirma.de", "mailto:info@musterfirma.de")
+    data = clean_document_bytes(doc)
+
+    new_bytes, _result, mapper = await _redact(data)
+    assert new_bytes is not None
+    # No raw angle bracket ever reaches the Target — Word would flag the package.
+    assert "<<" not in "".join(hyperlink_targets(new_bytes))
+
+    revealed = reidentify_file_bytes(new_bytes, DOCX_MIME, mapper.get_mapping_summary())
+    assert revealed is not None
+    assert hyperlink_targets(revealed) == ["mailto:info@musterfirma.de"]
+
+
+async def test_end_to_end_link_text_and_target_agree():
+    """Body pass then parts pass, in the order the SDK runs them.
+
+    Issue #27's shape: the display text was already ``<<EMAIL_1>>`` while the
+    relationship still pointed at the real address.
+    """
+    doc = _doc()
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.add_run("Kontakt: ")
+    add_hyperlink(footer, "info@musterfirma.de", "mailto:info@musterfirma.de")
+    data = clean_document_bytes(doc)
+
+    extracted = extract_docx(data)
+    start = extracted.index("info@musterfirma.de")
+    block = FileBlock(
+        content_bytes=data,
+        mime_type=DOCX_MIME,
+        source_path="brief.docx",
+        source_type="file",
+        extracted_text=extracted,
+        pseudonymized_text=extracted.replace("info@musterfirma.de", "<<EMAIL_1>>"),
+        entities=[
+            DetectedEntity(
+                entity_type="EMAIL",
+                text="info@musterfirma.de",
+                start=start,
+                end=start + len("info@musterfirma.de"),
+                score=0.99,
+                source="test",
+            )
+        ],
+    )
+    body_bytes = reconstruct(block)
+    assert body_bytes is not None
+
+    mapper = PseudonymMapper()
+    mapper.get_or_create("info@musterfirma.de", "EMAIL")  # what the body pass mapped
+    new_bytes, _result = await pseudonymize_docx_parts(
+        body_bytes, SubstringDetector({}), mapper, "de"
+    )
+    assert new_bytes is not None
+
+    assert_no_part_contains(new_bytes, ["info@musterfirma.de"])
+    assert hyperlink_targets(new_bytes) == ["mailto:%3C%3CEMAIL_1%3E%3E"]
+    out = Document(io.BytesIO(new_bytes)).sections[0].footer.paragraphs[0]
+    assert out.hyperlinks[0].text == "<<EMAIL_1>>"
