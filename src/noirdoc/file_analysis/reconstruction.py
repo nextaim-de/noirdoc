@@ -2,7 +2,10 @@
 
 Only a subset of formats support in-place reconstruction:
 
-* **DOCX** – replace text in paragraph runs via ``python-docx``
+* **DOCX** – rewrite every text surface through the shared walker in
+  :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
+  nested tables, text boxes and tracked changes; headers/footers; comments;
+  footnotes/endnotes)
 * **XLSX** – replace cell values via ``openpyxl``
 * **Plain text** – simple string encode
 
@@ -13,24 +16,10 @@ convert those blocks to text instead.
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-    from docx.text.run import Run
-
     from noirdoc.file_analysis.models import FileBlock
-
-
-class _BlockContainer(Protocol):
-    """Common interface of python-docx block containers (body, header, footer, cell)."""
-
-    @property
-    def paragraphs(self) -> list[Paragraph]: ...
-
-    @property
-    def tables(self) -> list[Table]: ...
 
 
 _RECONSTRUCTABLE_MIMES = {
@@ -85,26 +74,21 @@ def _reconstruct_plain(block: FileBlock) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _replace_in_block_container(container: _BlockContainer, replacements: dict[str, str]) -> None:
-    """Apply *replacements* to every paragraph in *container* and its tables."""
-    for para in container.paragraphs:
-        _replace_in_paragraph(para, replacements)
-    for table in container.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    _replace_in_paragraph(para, replacements)
-
-
 def _reconstruct_docx(block: FileBlock) -> bytes | None:
-    """Find-and-replace detected entities in DOCX paragraph runs.
+    """Find-and-replace detected entities across every DOCX text surface.
 
-    Covers the document body, every section's headers and footers
-    (default, first-page, even-page variants), and review comments —
-    matching the surfaces walked by :func:`extract_docx` so PII the
-    detector saw is also stripped from the output bytes.
+    Driven by the shared walker in :mod:`noirdoc.file_analysis.docx_surfaces`,
+    which covers the same surfaces :func:`extract_docx` extracts — body
+    (content controls, nested tables, text boxes including their
+    ``mc:Fallback`` duplicates, tracked insertions), all distinct headers
+    and footers, review comments, and footnotes/endnotes — so PII the
+    detector saw is also stripped from the output bytes. Tracked deletions
+    are stripped entirely: deleted text is still stored in the file, and a
+    redacted document must not carry it.
     """
     from docx import Document
+
+    from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
         doc = Document(io.BytesIO(block.content_bytes))
@@ -112,86 +96,19 @@ def _reconstruct_docx(block: FileBlock) -> bytes | None:
         return None
 
     replacements = _build_replacements(block)
-    if not replacements:
-        return block.content_bytes  # nothing to replace
 
-    _replace_in_block_container(doc, replacements)
+    def transform(text: str) -> str:
+        for original, pseudo in replacements.items():
+            if original in text:
+                text = text.replace(original, pseudo)
+        return text
 
-    for section in doc.sections:
-        for header in (section.header, section.first_page_header, section.even_page_header):
-            _replace_in_block_container(header, replacements)
-        for footer in (section.footer, section.first_page_footer, section.even_page_footer):
-            _replace_in_block_container(footer, replacements)
-
-    try:
-        comments = list(doc.comments)
-    except Exception:
-        comments = []
-    for comment in comments:
-        _replace_in_block_container(comment, replacements)
+    if not rewrite_document_texts(doc, transform, strip_deleted=True):
+        return block.content_bytes  # nothing to replace or strip
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-def _replace_in_paragraph(para: Paragraph, replacements: dict[str, str]) -> None:
-    """Replace entity text in a paragraph, hyperlink-aware.
-
-    ``para.text`` concatenates hyperlink text but ``para.runs`` excludes
-    hyperlink runs, so a whole-paragraph rewrite through ``para.runs``
-    leaks entities inside hyperlinks and duplicates hyperlink text into
-    ordinary runs.  Instead, walk ``iter_inner_content()`` and rewrite
-    each segment separately: maximal groups of consecutive plain runs,
-    and each hyperlink's own runs (which stay inside the hyperlink).
-    """
-    for runs in paragraph_run_segments(para):
-        _replace_in_runs(runs, replacements)
-
-
-def paragraph_run_segments(para: Paragraph) -> list[list[Run]]:
-    """Split a paragraph into rewritable run groups.
-
-    Consecutive plain runs form one segment (an entity may span several
-    of them); each hyperlink contributes its own runs as a separate
-    segment so its text is never mixed into surrounding runs.
-    """
-    from docx.text.hyperlink import Hyperlink
-
-    segments: list[list[Run]] = []
-    plain: list[Run] = []
-    for item in para.iter_inner_content():
-        if isinstance(item, Hyperlink):
-            if plain:
-                segments.append(plain)
-                plain = []
-            segments.append(list(item.runs))
-        else:
-            plain.append(item)
-    if plain:
-        segments.append(plain)
-    return segments
-
-
-def _replace_in_runs(runs: list[Run], replacements: dict[str, str]) -> None:
-    """Apply *replacements* to the concatenated text of *runs*, in place."""
-    if not runs:
-        return
-
-    full_text = "".join(run.text for run in runs)
-    new_text = full_text
-    for original, pseudo in replacements.items():
-        if original in new_text:
-            new_text = new_text.replace(original, pseudo)
-
-    if new_text == full_text:
-        return
-
-    # Re-write runs: clear all but first, set first to full text.
-    # This simplifies formatting but is acceptable for v1.
-    runs[0].text = new_text
-    for run in runs[1:]:
-        run.text = ""
 
 
 # ---------------------------------------------------------------------------

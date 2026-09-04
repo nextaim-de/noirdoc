@@ -244,3 +244,39 @@ def test_unsupported_image():
 def test_empty_mappings():
     result = reidentify_file_bytes(b"hello", "text/plain", {})
     assert result is None
+
+
+def test_reidentify_docx_blind_spot_surfaces():
+    """Reveal must reach every surface the redactor can place a pseudonym on."""
+    from docx import Document
+
+    from tests.file_analysis.docx_helpers import (
+        add_block_sdt,
+        add_endnotes_part,
+        add_footnotes_part,
+        add_nested_table,
+        add_textbox_paragraph,
+        all_xml,
+        docx_bytes,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Report by <<PERSON_1>>")
+    add_block_sdt(doc, "Bearbeiter: <<PERSON_1>>")
+    add_nested_table(doc, outer_text="Outer", inner_text="Kontakt: <<EMAIL_1>>")
+    add_textbox_paragraph(doc, "Box: <<PERSON_1>>")
+    add_footnotes_part(doc, "Fussnote: <<PERSON_1>>")
+    add_endnotes_part(doc, "Endnote: <<EMAIL_1>>")
+
+    result = reidentify_file_bytes(
+        docx_bytes(doc),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        MAPPINGS,
+    )
+    assert result is not None
+
+    xml = all_xml(result)
+    assert b"<<PERSON_1>>" not in xml
+    assert b"<<EMAIL_1>>" not in xml
+    assert "Max Müller".encode() in xml
+    assert b"max@test.de" in xml

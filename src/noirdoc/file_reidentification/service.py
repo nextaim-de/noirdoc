@@ -2,7 +2,10 @@
 
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
-* **DOCX** – python-docx paragraph runs + table cells
+* **DOCX** – every text surface via the shared walker in
+  :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
+  nested tables, text boxes and tracked changes; headers/footers; comments;
+  footnotes/endnotes)
 * **XLSX** – openpyxl cell values plus every part-level surface enumerated by
   :mod:`noirdoc.file_analysis.xlsx_parts` (docProps, comments, headers/footers,
   pivot caches and table captions, chart caches/titles, hyperlinks, filter and
@@ -25,8 +28,6 @@ from noirdoc.mappings.hydration import hydrate_mapper
 from noirdoc.reidentification.engine import ReidentificationEngine
 
 if TYPE_CHECKING:
-    from docx.text.paragraph import Paragraph
-
     from noirdoc.pseudonymization.mapper import PseudonymMapper
 
 logger = structlog.get_logger()
@@ -92,8 +93,17 @@ def _reidentify_text(
 def _reidentify_docx(
     file_bytes: bytes, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bytes | None:
-    """Walk DOCX paragraphs and table cells, reidentify text in runs."""
+    """Reidentify pseudonyms across every DOCX text surface.
+
+    Uses the shared walker in :mod:`noirdoc.file_analysis.docx_surfaces` — the
+    same one redaction rewrites with — so a pseudonym the redactor could
+    place (body incl. content controls, nested tables, text boxes and
+    tracked changes; headers/footers; comments; footnotes/endnotes) is also
+    found on reveal.
+    """
     from docx import Document
+
+    from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
         doc = Document(io.BytesIO(file_bytes))
@@ -101,56 +111,17 @@ def _reidentify_docx(
         logger.warning("file_reident.docx_load_failed")
         return None
 
-    changed = False
+    def transform(text: str) -> str:
+        if not _PSEUDO_PATTERN.search(text):
+            return text
+        return engine.reidentify(text, mapper)
 
-    for para in doc.paragraphs:
-        if _reidentify_paragraph(para, engine, mapper):
-            changed = True
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if _reidentify_paragraph(para, engine, mapper):
-                        changed = True
-
-    if not changed:
+    if not rewrite_document_texts(doc, transform, strip_deleted=False):
         return file_bytes
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-def _reidentify_paragraph(
-    para: Paragraph, engine: ReidentificationEngine, mapper: PseudonymMapper
-) -> bool:
-    """Reidentify text in a paragraph, hyperlink-aware. Returns True if changed.
-
-    Rewrites each segment separately — consecutive plain runs as one
-    group, each hyperlink's own runs on their own — so pseudonyms inside
-    hyperlinks are revealed and hyperlink text is never duplicated into
-    ordinary runs (see ``_replace_in_paragraph`` in
-    :mod:`noirdoc.file_analysis.reconstruction`).
-    """
-    from noirdoc.file_analysis.reconstruction import paragraph_run_segments
-
-    changed = False
-    for runs in paragraph_run_segments(para):
-        if not runs:
-            continue
-        full_text = "".join(run.text for run in runs)
-        if not _PSEUDO_PATTERN.search(full_text):
-            continue
-
-        new_text = engine.reidentify(full_text, mapper)
-        if new_text == full_text:
-            continue
-
-        runs[0].text = new_text
-        for run in runs[1:]:
-            run.text = ""
-        changed = True
-    return changed
 
 
 def _reidentify_xlsx(
