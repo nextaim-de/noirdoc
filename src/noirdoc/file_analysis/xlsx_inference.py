@@ -8,6 +8,13 @@ Three-tier approach for the cell grid:
 Only cells in classified columns are pseudonymized, using direct
 ``mapper.get_or_create()`` calls instead of full NLP per cell.
 
+Row 1 is the exception. The tiers read it as a header and the rewrite starts at
+row 2, so a sheet whose data begins at row 1 — a pasted list, an export with no
+header — used to ship its whole first record, silently, while the run still
+reported a healthy entity count. Row 1 is now re-examined once the columns are
+classified; see :func:`_first_row_candidates` for the rule that decides label
+from data without eating real headers.
+
 Everything *outside* the cell grid — ``docProps`` metadata, comments,
 headers/footers, pivot caches — is handled by :mod:`noirdoc.file_analysis.xlsx_parts`
 after the sheet pass, sharing the same mapper so a name gets one placeholder
@@ -18,9 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import io
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
@@ -148,6 +155,26 @@ def infer_entity_type(header_value: object) -> str | None:
     return None
 
 
+async def detect_each(
+    texts: Sequence[str],
+    detector: DetectorLike,
+    language: str,
+    *,
+    concurrency: int = 8,
+) -> list[list[DetectedEntity]]:
+    """Run the detector over *texts* concurrently, results in the same order."""
+    if not texts:
+        return []
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _detect(text: str) -> list[DetectedEntity]:
+        async with sem:
+            return await detector.detect(text, language)
+
+    return await asyncio.gather(*[_detect(text) for text in texts])
+
+
 async def classify_by_sample[K: Hashable](
     samples: Sequence[tuple[K, str]],
     detector: DetectorLike,
@@ -164,13 +191,9 @@ async def classify_by_sample[K: Hashable](
     if not samples:
         return {}
 
-    sem = asyncio.Semaphore(concurrency)
-
-    async def _detect(text: str) -> list[DetectedEntity]:
-        async with sem:
-            return await detector.detect(text, language)
-
-    results = await asyncio.gather(*[_detect(text) for _, text in samples])
+    results = await detect_each(
+        [text for _, text in samples], detector, language, concurrency=concurrency
+    )
 
     classified: dict[K, str] = {}
     for (key, _), entities in zip(samples, results, strict=True):
@@ -178,6 +201,94 @@ async def classify_by_sample[K: Hashable](
             best = max(entities, key=lambda e: e.score)
             classified[key] = best.entity_type
     return classified
+
+
+async def _detect_first_row(
+    candidates: Sequence[Any],
+    detector: DetectorLike,
+    language: str,
+) -> dict[int, list[DetectedEntity]]:
+    """Detect over the row-1 cells that might be data rather than a label.
+
+    Each distinct string is detected once — a row 1 repeated across columns
+    ("n/a", a date) costs one call, not one per column.
+    """
+    if not candidates:
+        return {}
+    order: dict[str, int] = {}
+    for cell in candidates:
+        order.setdefault(cell.value, len(order))
+    results = await detect_each(list(order), detector, language)
+    return {cell.column: results[order[cell.value]] for cell in candidates}
+
+
+def _first_row_candidates(
+    header_row: Sequence[Any],
+    keyword_cols: set[int],
+    col_types: Mapping[int, str | None],
+    *,
+    single_row: bool,
+) -> list[Any]:
+    """Row-1 cells that may hold data instead of a column label.
+
+    Tier 3 starts at row 2, so nothing else in the sheet pass ever looks at row
+    1: a list pasted without a header, or an export that starts at row 1, used
+    to ship its whole first record. Two things keep this from eating real
+    headers, which would be its own kind of damage:
+
+    * A cell whose own text matched the keyword map is a label by definition
+      ("Name", "E-Mail") — never a candidate.
+    * Otherwise the column has to have been classified from rows 2 onwards, so
+      row 1 is only rewritten where the data below it says that column holds
+      PII. A header the keyword map missed ("Betrag") sits over numbers, gets
+      no classification, and is left alone even if NER would flag the word.
+
+    A single-row sheet has no rows below to compare against, and no reason to
+    hold a header with nothing under it, so every cell is a candidate. Those
+    sheets used to be skipped outright.
+    """
+    return [
+        cell
+        for cell in header_row
+        if cell.column not in keyword_cols
+        and isinstance(cell.value, str)
+        and cell.value.strip()
+        and (single_row or col_types.get(cell.column) not in (None, "skip"))
+    ]
+
+
+def _pseudonymize_first_row(
+    header_row: Sequence[Any],
+    row_one_entities: Mapping[int, list[DetectedEntity]],
+    mapper: PseudonymMapper,
+    result: XlsxResult,
+    *,
+    apply: bool,
+) -> None:
+    """Replace the detected spans in row 1, span-wise like free text.
+
+    Span-wise rather than whole-cell (what tier 3 does for a classified column)
+    because row 1 is not known to be a bare value: "Kontakt Anna Mueller" keeps
+    its prefix. The mapper is shared, so a cell that *is* just the name gets the
+    same placeholder the same name gets in row 5.
+    """
+    from noirdoc.pseudonymization.engine import PseudonymizationEngine
+
+    engine = PseudonymizationEngine()
+    for cell in header_row:
+        entities = row_one_entities.get(cell.column)
+        if not entities or not isinstance(cell.value, str):
+            continue
+        if apply:
+            cell.value = engine.pseudonymize(cell.value, entities, mapper)
+        for entity in entities:
+            result.entity_count += 1
+            result.entity_types[entity.entity_type] = (
+                result.entity_types.get(entity.entity_type, 0) + 1
+            )
+        best = max(entities, key=lambda e: e.score)
+        # Keyed by position, never by the cell's text — that text is the PII.
+        result.column_classifications[f"row1!col{cell.column}"] = f"{best.entity_type} (row 1 data)"
 
 
 @dataclass
@@ -261,21 +372,24 @@ async def pseudonymize_xlsx_smart(
 
     # Chartsheets have no cell grid; their headers/footers are handled with the parts.
     for ws in wb.worksheets:
-        if ws.max_row is None or ws.max_row < 2:
+        if ws.max_row is None or ws.max_row < 1:
             continue
 
         # --- Tier 1: classify columns from header row ---
         col_types: dict[int, str | None] = {}
         header_row = list(next(ws.iter_rows(min_row=1, max_row=1)))
+        keyword_cols: set[int] = set()
         for cell in header_row:
             etype = infer_entity_type(cell.value)
             col_types[cell.column] = etype
             if etype:
+                keyword_cols.add(cell.column)
                 label = cell.value if isinstance(cell.value, str) else f"col{cell.column}"
                 result.column_classifications[label] = f"{etype} (header)"
 
         # --- Tier 2: sample first N data rows for unclassified columns ---
         unknown_cols = {col for col, t in col_types.items() if t is None}
+        sampled: dict[int, str] = {}
         if unknown_cols:
             sample_cells: list[tuple[int, str]] = []
             for row in ws.iter_rows(min_row=2, max_row=min(1 + sample_rows, ws.max_row)):
@@ -290,20 +404,44 @@ async def pseudonymize_xlsx_smart(
             sampled = await classify_by_sample(sample_cells, detector, language)
             for col_idx, sampled_type in sampled.items():
                 col_types[col_idx] = sampled_type
-                # Find header label for logging
-                hcell = next((c for c in header_row if c.column == col_idx), None)
-                label = hcell.value if hcell and isinstance(hcell.value, str) else f"col{col_idx}"
-                result.column_classifications[label] = f"{sampled_type} (sampled)"
 
             # Mark remaining unknowns as skip
             for col in unknown_cols:
                 if col_types[col] is None:
                     col_types[col] = "skip"
 
+        # --- Row 1: a header label, or the first record? ---
+        row_one_entities = await _detect_first_row(
+            _first_row_candidates(header_row, keyword_cols, col_types, single_row=ws.max_row == 1),
+            detector,
+            language,
+        )
+        data_cols = {col for col, entities in row_one_entities.items() if entities}
+
+        # Labels for the sampled columns are assigned here rather than above,
+        # because a row-1 cell that turned out to be data must not become a
+        # dict key: column_classifications is logged.
+        for col_idx, sampled_type in sampled.items():
+            hcell = next((c for c in header_row if c.column == col_idx), None)
+            label = (
+                hcell.value
+                if hcell and isinstance(hcell.value, str) and col_idx not in data_cols
+                else f"col{col_idx}"
+            )
+            result.column_classifications[label] = f"{sampled_type} (sampled)"
+
         for cell in header_row:
             col_type = col_types.get(cell.column)
-            if isinstance(cell.value, str) and col_type and col_type != "skip":
+            if (
+                isinstance(cell.value, str)
+                and col_type
+                and col_type != "skip"
+                and cell.column not in data_cols  # a value, not a field name
+            ):
                 known_fields.setdefault(cell.value.strip().lower(), col_type)
+
+        # Must run after known_fields, which reads the original row-1 strings.
+        _pseudonymize_first_row(header_row, row_one_entities, mapper, result, apply=pseudonymize)
 
         # --- Tier 3: process all data rows for classified columns ---
         for row in ws.iter_rows(min_row=2):

@@ -53,6 +53,17 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data-validation inline lists and prompts, and pivot-table captions and label
   filters. Defined names and sheet titles remain uncovered — renaming either
   would require rewriting every formula that references them. ([#15])
+- **XLSX: row 1 was never redacted, and single-row sheets were skipped.** The
+  column tiers read row 1 as a header and the rewrite started at row 2, so a
+  sheet whose data begins at row 1 — a pasted list, an export with no header —
+  shipped its whole first record, and a sheet with only one row was skipped
+  before classification ran. Both silently: the run still reported a healthy
+  entity count. Row 1 is now re-examined after the columns are classified and
+  redacted where it holds data. A cell whose text matches the header keyword
+  map stays a label, and elsewhere the column has to have been classified from
+  the rows below, so an unrecognized header over numbers is still left alone.
+  Row-1 values also no longer end up as keys in the logged
+  `column_classifications`. ([#30])
 - **XLSX: a load failure returned the original workbook as "redacted".**
   `pseudonymize_xlsx_smart` swallowed zip-safety rejections, corrupt packages
   and openpyxl parse failures (pivot caches with manually grouped fields) and
@@ -94,6 +105,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [#16]: https://github.com/noirdoc-ai/mask-engine/issues/16
 [#17]: https://github.com/noirdoc-ai/mask-engine/issues/17
 [#27]: https://github.com/noirdoc-ai/mask-engine/issues/27
+[#30]: https://github.com/noirdoc-ai/mask-engine/issues/30
 
 ## [0.1.3] — 2026-09-01
 
