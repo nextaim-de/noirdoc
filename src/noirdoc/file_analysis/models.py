@@ -42,4 +42,8 @@ class FileAnalysisResult:
     total_entities: int = 0
     entity_types: dict[str, int] = field(default_factory=dict)
     blocked: bool = False  # True if request should be rejected (block mode)
+    # XLSX free-text parts (comments, docProps, …) not scanned by NER because of
+    # the detect/block scan cap or block-mode early exit. Non-zero means counts
+    # are a lower bound — never a silent skip.
+    free_texts_skipped: int = 0
     blocks: list[FileBlock] = field(default_factory=list)

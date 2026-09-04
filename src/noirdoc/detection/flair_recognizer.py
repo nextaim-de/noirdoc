@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 from presidio_analyzer import EntityRecognizer, RecognizerResult
 
 if TYPE_CHECKING:
+    from flair.models import SequenceTagger
     from presidio_analyzer.nlp_engine import NlpArtifacts
 
 
@@ -24,7 +25,7 @@ class FlairRecognizer(EntityRecognizer):
     def __init__(self, model_name: str = "flair/ner-german-large") -> None:
         # Set attributes BEFORE super().__init__ because it calls self.load()
         self._model_name = model_name
-        self._model = None
+        self._model: SequenceTagger | None = None
         super().__init__(
             supported_entities=list(self.PRESIDIO_EQUIVALENCES.values()),
             supported_language="de",
@@ -50,11 +51,12 @@ class FlairRecognizer(EntityRecognizer):
             return []
 
         self._ensure_model()
+        assert self._model is not None
 
         from flair.data import Sentence
 
         sentence = Sentence(text)
-        self._model.predict(sentence)  # type: ignore[attr-defined]
+        self._model.predict(sentence)
 
         results: list[RecognizerResult] = []
         for span in sentence.get_spans("ner"):

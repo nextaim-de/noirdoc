@@ -78,16 +78,36 @@ async def analyze_files_in_body(
 
         # XLSX fast path: column-inference analysis/pseudonymization
         if block.mime_type == _XLSX_MIME and policy.should_detect_pii():
-            from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
+            from noirdoc.file_analysis.xlsx_inference import XlsxLoadError, pseudonymize_xlsx_smart
 
-            xlsx_result = await pseudonymize_xlsx_smart(
-                block.content_bytes,
-                detector,
-                mapper,
-                language,
-                pseudonymize=policy.should_pseudonymize(),
-            )
+            try:
+                xlsx_result = await pseudonymize_xlsx_smart(
+                    block.content_bytes,
+                    detector,
+                    mapper,
+                    language,
+                    pseudonymize=policy.should_pseudonymize(),
+                    # Block mode: the first hit settles the decision — no full count needed.
+                    stop_on_first_hit=policy.should_block_on_pii(),
+                )
+            except XlsxLoadError as exc:
+                # Fail closed: the workbook was never analysed, so it must not
+                # reach the provider in modes that promise masking/blocking.
+                # (Detect-only never modifies the body by design.)
+                block.extraction_error = str(exc)
+                result.files_extraction_errors += 1
+                if policy.should_pseudonymize() or policy.should_block_on_pii():
+                    result.files_blocked += 1
+                    result.blocked = True
+                logger.warning(
+                    "file_analysis.xlsx_load_failed",
+                    path=block.source_path,
+                    mode=mode.value,
+                    error=str(exc),
+                )
+                continue
             result.total_entities += xlsx_result.entity_count
+            result.free_texts_skipped += xlsx_result.free_texts_skipped
             for etype, count in xlsx_result.entity_types.items():
                 result.entity_types[etype] = result.entity_types.get(etype, 0) + count
 
@@ -105,6 +125,7 @@ async def analyze_files_in_body(
                 mode=mode.value,
                 entity_count=xlsx_result.entity_count,
                 columns=xlsx_result.column_classifications,
+                free_texts_skipped=xlsx_result.free_texts_skipped,
             )
             continue
 

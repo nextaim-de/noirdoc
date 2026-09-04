@@ -124,20 +124,33 @@ def _reidentify_docx(
 def _reidentify_paragraph(
     para: Paragraph, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bool:
-    """Reidentify text in a paragraph's runs. Returns True if changed."""
-    full_text = para.text
-    if not _PSEUDO_PATTERN.search(full_text):
-        return False
+    """Reidentify text in a paragraph, hyperlink-aware. Returns True if changed.
 
-    new_text = engine.reidentify(full_text, mapper)
-    if new_text == full_text:
-        return False
+    Rewrites each segment separately — consecutive plain runs as one
+    group, each hyperlink's own runs on their own — so pseudonyms inside
+    hyperlinks are revealed and hyperlink text is never duplicated into
+    ordinary runs (see ``_replace_in_paragraph`` in
+    :mod:`noirdoc.file_analysis.reconstruction`).
+    """
+    from noirdoc.file_analysis.reconstruction import paragraph_run_segments
 
-    if para.runs:
-        para.runs[0].text = new_text
-        for run in para.runs[1:]:
+    changed = False
+    for runs in paragraph_run_segments(para):
+        if not runs:
+            continue
+        full_text = "".join(run.text for run in runs)
+        if not _PSEUDO_PATTERN.search(full_text):
+            continue
+
+        new_text = engine.reidentify(full_text, mapper)
+        if new_text == full_text:
+            continue
+
+        runs[0].text = new_text
+        for run in runs[1:]:
             run.text = ""
-    return True
+        changed = True
+    return changed
 
 
 def _reidentify_xlsx(

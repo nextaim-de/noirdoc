@@ -29,7 +29,7 @@ Repeat on **TestPyPI** → https://test.pypi.org/manage/account/publishing/ with
 
 A "pending" publisher reserves the name on each index before the first upload. The first successful publish promotes it to a regular publisher.
 
-The publisher must match the repository that runs the workflow **exactly** (owner, repo, workflow file, environment). After the move from `nextaim-de/noirdoc` to `noirdoc-ai/mask-engine` the publish step failed with `invalid-publisher` until the entries on both indexes were re-registered with the new owner/repo — the failing run prints the claims it presented, which are the values to enter.
+The publisher must match the repository that runs the workflow **exactly** (owner, repo, workflow file, environment). After the move from `nextaim-de/noirdoc` to `noirdoc-ai/mask-engine` the publish step failed with `invalid-publisher` until the entries on both indexes were re-registered with the new owner/repo — the failing run prints the claims it presented, which are the values to enter. **Any repo move or rename therefore requires re-registering the Trusted Publisher on both PyPI and TestPyPI before the next release** — GitHub's redirects don't apply to OIDC claims.
 
 ### 2. Create GitHub environments
 

@@ -36,7 +36,11 @@ from urllib.parse import quote, unquote
 
 import structlog
 
-from noirdoc.file_analysis.xlsx_inference import classify_by_sample, infer_entity_type
+from noirdoc.file_analysis.xlsx_inference import (
+    DEFAULT_MAX_FREE_TEXTS,
+    classify_by_sample,
+    infer_entity_type,
+)
 
 if TYPE_CHECKING:
     from openpyxl.workbook.workbook import Workbook
@@ -85,6 +89,9 @@ _HEADER_FOOTER_PARTS = ("left", "center", "right")
 #             otherwise treated like free text so wildcards survive.
 SlotKind = Literal["author", "free", "pivot", "filter"]
 FieldKey = tuple[int, int]  # (pivot cache ordinal, cacheField index)
+
+# How many detector.detect() calls run concurrently over free-text parts.
+_FREE_TEXT_CONCURRENCY = 8
 
 # An Excel formula that is exactly one double-quoted string literal.
 _QUOTED_LITERAL = re.compile(r'^"(?:[^"]|"")*"$')
@@ -275,6 +282,10 @@ class PartsResult:
 
     entity_types: dict[str, int] = field(default_factory=dict)
     classifications: dict[str, str] = field(default_factory=dict)
+    # Distinct free texts NOT run through the detector (cap or block-mode early
+    # exit; detect/block modes only). Callers must surface this — a partial scan
+    # is only acceptable when it is reported.
+    free_texts_skipped: int = 0
 
     @property
     def entity_count(self) -> int:
@@ -605,13 +616,54 @@ def _needs_detection(slot: _Slot, mapper: PseudonymMapper) -> bool:
 async def _detect_all(
     texts: list[str], detector: DetectorLike, language: str
 ) -> list[list[DetectedEntity]]:
-    sem = asyncio.Semaphore(8)
+    sem = asyncio.Semaphore(_FREE_TEXT_CONCURRENCY)
 
     async def _one(text: str) -> list[DetectedEntity]:
         async with sem:
             return await detector.detect(text, language)
 
     return await asyncio.gather(*[_one(t) for t in texts])
+
+
+async def _detect_free_texts(
+    texts: list[str],
+    detector: DetectorLike,
+    language: str,
+    *,
+    limit: int | None,
+    stop_on_first_hit: bool,
+) -> tuple[list[list[DetectedEntity]], int]:
+    """Detect over *texts* in order; return ``(results for a prefix, n unscanned)``.
+
+    ``limit`` caps how many texts are scanned at all. ``stop_on_first_hit``
+    processes the capped list in chunks of ``_FREE_TEXT_CONCURRENCY`` and stops
+    after the first chunk that yields any entity — the block decision does not
+    need the full count. Texts beyond the scanned prefix count as unscanned.
+    """
+    capped = texts if limit is None or len(texts) <= limit else texts[:limit]
+    if not stop_on_first_hit:
+        return await _detect_all(capped, detector, language), len(texts) - len(capped)
+    results: list[list[DetectedEntity]] = []
+    for start in range(0, len(capped), _FREE_TEXT_CONCURRENCY):
+        chunk = capped[start : start + _FREE_TEXT_CONCURRENCY]
+        results.extend(await _detect_all(chunk, detector, language))
+        if any(results):
+            break
+    return results, len(texts) - len(results)
+
+
+def _has_deterministic_hit(slots: list[_Slot], mapper: PseudonymMapper) -> bool:
+    """True when an author slot is a guaranteed entity (same exclusions as the main loop)."""
+    for slot in slots:
+        if slot.kind != "author":
+            continue
+        value = slot.value
+        if value is None or _THREADED_MIRROR_AUTHOR.match(value.strip()):
+            continue
+        if mapper.reverse_lookup(value) is not None:
+            continue
+        return True
+    return False
 
 
 async def _classify_pivot_fields(
@@ -668,6 +720,8 @@ async def pseudonymize_workbook_parts(
     apply: bool = True,
     sample_size: int = 5,
     known_fields: Mapping[str, str] | None = None,
+    max_free_texts: int | None = DEFAULT_MAX_FREE_TEXTS,
+    stop_on_first_hit: bool = False,
 ) -> PartsResult:
     """Pseudonymize every part-level string slot of *wb* in place.
 
@@ -678,8 +732,19 @@ async def pseudonymize_workbook_parts(
     With ``apply=False`` (detect-only / block modes) entities are detected and
     counted but nothing is written and the mapper is never touched — the proxy
     shares one mapper between message text and files.
+
+    *max_free_texts* caps how many distinct free texts are run through the
+    detector, and *stop_on_first_hit* (block mode) stops the free-text scan as
+    soon as any hit is certain. Both apply only with ``apply=False``: a capped
+    redact pass would silently forward unmasked text, so redact mode always
+    scans everything. Skipped texts are reported in
+    ``PartsResult.free_texts_skipped`` — never dropped silently.
     """
     from noirdoc.pseudonymization.engine import PseudonymizationEngine
+
+    if apply:  # fail-safe: redact mode must scan every free text
+        max_free_texts = None
+        stop_on_first_hit = False
 
     result = PartsResult()
     slots = [s for s in iter_text_slots(wb) if s.value is not None]
@@ -693,11 +758,32 @@ async def pseudonymize_workbook_parts(
         text = slots[i].value
         if text is not None and text not in unique_texts:
             unique_texts[text] = len(unique_texts)
-    unique_results = await _detect_all(list(unique_texts), detector, language)
+
+    if stop_on_first_hit and _has_deterministic_hit(slots, mapper):
+        # An author slot already guarantees a hit — no NER needed for the block decision.
+        unique_results: list[list[DetectedEntity]] = []
+        result.free_texts_skipped = len(unique_texts)
+    else:
+        unique_results, result.free_texts_skipped = await _detect_free_texts(
+            list(unique_texts),
+            detector,
+            language,
+            limit=max_free_texts,
+            stop_on_first_hit=stop_on_first_hit,
+        )
+    if result.free_texts_skipped:
+        logger.warning(
+            "xlsx_parts.free_texts_not_scanned",
+            skipped=result.free_texts_skipped,
+            scanned=len(unique_results),
+            stop_on_first_hit=stop_on_first_hit,
+            max_free_texts=max_free_texts,
+        )
     detected = {
-        i: unique_results[unique_texts[text]]
+        i: unique_results[pos]
         for i in free_indexes
         if (text := slots[i].value) is not None
+        and (pos := unique_texts[text]) < len(unique_results)
     }
     field_types = await _classify_pivot_fields(
         slots, detector, language, sample_size, known_fields or {}, result
@@ -796,7 +882,12 @@ async def pseudonymize_workbook_parts(
             if apply and new_value != value:
                 slot.set(new_value)
 
-    logger.debug("xlsx_parts.completed", entity_types=result.entity_types, apply=apply)
+    logger.debug(
+        "xlsx_parts.completed",
+        entity_types=result.entity_types,
+        apply=apply,
+        free_texts_skipped=result.free_texts_skipped,
+    )
     return result
 
 
