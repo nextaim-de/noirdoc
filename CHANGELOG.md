@@ -5,13 +5,64 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **DOCX: everything outside paragraph runs was invisible to redaction.**
+  `extract_docx` walked `doc.paragraphs` and `doc.tables` only, so PII in
+  content controls (`w:sdt`), tables nested inside a cell, text boxes and
+  shapes (`w:txbxContent`), tracked changes (`w:ins`/`w:del` — deleted text is
+  still stored in the file), and the footnotes/endnotes parts was neither shown
+  to the detector nor rewritten. One shared XML walker now drives extraction,
+  redaction and reveal over all of them, so the surfaces the detector sees and
+  the surfaces the rewrite touches cannot drift apart. Tracked deletions are
+  stripped from the output entirely. Inline pictures, line breaks and tab stops
+  survive the rewrite. ([#17])
+- **DOCX: `docProps`, comment authors and `word/people.xml` survived
+  redaction.** python-docx preserves every package part it does not edit, so a
+  redacted document still carried creator, lastModifiedBy, title, subject,
+  `app.xml` Manager/Company/HyperlinkBase/TitlesOfParts, custom properties,
+  comment `w:author`/`w:initials`, and modern comment identities — verbatim.
+  All of these are now pseudonymized through the shared mapper and are
+  reversible. `docProps/thumbnail.jpeg` (a rendered preview of the *original*
+  page) and `customXml/` data islands cannot be pseudonymized and are dropped
+  on write; they are reported separately from the entity count, since carrying
+  them says nothing about whether a document holds PII. ([#14])
+- **DOCX: an entity inside a hyperlink was left in the link.** The rewrite read
+  `para.text` (which includes hyperlink text) but wrote back through
+  `para.runs` (which does not), so the placeholder was prepended while the
+  original address stayed in the link run — and an unrelated hyperlink in the
+  same paragraph was duplicated into the first run. Each hyperlink is now its
+  own rewrite segment. The relationship *target* is still not scrubbed
+  ([#27]). ([#16])
+- **XLSX: charts, hyperlinks, filters, validations and pivot captions were
+  round-tripped verbatim.** Excel writes a cache of the charted cells, so an
+  Excel-authored chart kept rendering the original names after the sheet cells
+  were pseudonymized. Now covered, in both directions: chart string caches and
+  titles, hyperlink tooltip/display and `mailto:` targets (percent-encoded in
+  the target, since `<` and `>` are illegal URI characters), AutoFilter
+  criteria, conditional-formatting text criteria and string literals,
+  data-validation inline lists and prompts, and pivot-table captions and label
+  filters. Defined names and sheet titles remain uncovered — renaming either
+  would require rewriting every formula that references them. ([#15])
+- **XLSX: a load failure returned the original workbook as "redacted".**
+  `pseudonymize_xlsx_smart` swallowed zip-safety rejections, corrupt packages
+  and openpyxl parse failures (pivot caches with manually grouped fields) and
+  returned an empty result; the SDK then wrote the *original* file to the
+  output path and reported `0 entities`, and the proxy forwarded it to the
+  provider. It now raises `XlsxLoadError` and every caller fails closed. The
+  DOCX parts pass fails closed the same way. ([#13])
+
 ### Changed
 - Docs: all repo URLs now point at `noirdoc-ai/mask-engine` (was
   `nextaim-de/noirdoc`); `CONTRIBUTING.md` rewritten for the uv + Makefile
   workflow (was Poetry); `docs/RELEASING.md` notes that a repo move requires
   re-registering the Trusted Publisher on both indexes. ([#12])
-
-[#12]: https://github.com/noirdoc-ai/mask-engine/issues/12
+- **The XLSX free-text NER pass is bounded in detect and block modes.** A
+  workbook with thousands of distinct comments cost one detector call each.
+  Detect and block modes now cap the scan and stop at the first hit, and report
+  what they skipped in `free_texts_skipped` rather than skipping silently.
+  Redact mode is never capped — a partial redact pass would forward unmasked
+  text. Mirrored values the mapper already knows (chart caches, filter
+  criteria) skip the detector entirely. ([#11])
 
 ### Fixed
 - **Plain-text fallback is now visible.** When DOCX/XLSX reconstruction fails
@@ -22,7 +73,17 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RedactionResult` and the daemon protocol's `RedactResult` gained a
   `reason: str | None` field explaining why the original format was dropped
   (`reconstructed=False`, `mime_type="text/plain"` remain the machine
-  signals). (#10)
+  signals). ([#10])
+
+[#10]: https://github.com/noirdoc-ai/mask-engine/issues/10
+[#11]: https://github.com/noirdoc-ai/mask-engine/issues/11
+[#12]: https://github.com/noirdoc-ai/mask-engine/issues/12
+[#13]: https://github.com/noirdoc-ai/mask-engine/issues/13
+[#14]: https://github.com/noirdoc-ai/mask-engine/issues/14
+[#15]: https://github.com/noirdoc-ai/mask-engine/issues/15
+[#16]: https://github.com/noirdoc-ai/mask-engine/issues/16
+[#17]: https://github.com/noirdoc-ai/mask-engine/issues/17
+[#27]: https://github.com/noirdoc-ai/mask-engine/issues/27
 
 ## [0.1.3] — 2026-09-01
 
