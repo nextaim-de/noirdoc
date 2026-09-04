@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import io
+from typing import TYPE_CHECKING
 
 from noirdoc.file_reidentification.service import reidentify_file_bytes
+
+if TYPE_CHECKING:
+    from docx.text.paragraph import Paragraph
 
 MAPPINGS = {
     "<<PERSON_1>>": "Max Müller",
@@ -80,6 +84,73 @@ def test_reidentify_docx_table():
 
     result_doc = Document(io.BytesIO(result))
     assert result_doc.tables[0].rows[0].cells[1].text == "Max Müller"
+
+
+def _add_hyperlink(para: Paragraph, text: str, url: str) -> None:
+    """Append a real ``w:hyperlink`` (with one run) to *para*."""
+    from docx.opc.constants import RELATIONSHIP_TYPE
+    from docx.oxml.ns import qn
+    from docx.oxml.parser import OxmlElement
+
+    r_id = para.part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    para._p.append(hyperlink)
+
+
+def test_reidentify_docx_pseudonym_inside_hyperlink():
+    """Reveal round-trip: a pseudonym in hyperlink text must be reidentified in place."""
+    from docx import Document
+
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Kontakt: ")
+    _add_hyperlink(para, "<<EMAIL_1>>", "mailto:masked@example.invalid")
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    result = reidentify_file_bytes(
+        buf.getvalue(),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        MAPPINGS,
+    )
+    assert result is not None
+
+    out = Document(io.BytesIO(result)).paragraphs[0]
+    assert out.text == "Kontakt: max@test.de"
+    # The original must land inside the hyperlink, not in the plain runs
+    assert out.hyperlinks[0].text == "max@test.de"
+    assert "max@test.de" not in "".join(run.text for run in out.runs)
+
+
+def test_reidentify_docx_keeps_unrelated_hyperlink_intact():
+    """A hyperlink next to a revealed pseudonym must not be duplicated into runs."""
+    from docx import Document
+
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("<<PERSON_1>> (siehe ")
+    _add_hyperlink(para, "www.firma.de", "https://www.firma.de")
+    para.add_run(")")
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    result = reidentify_file_bytes(
+        buf.getvalue(),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        MAPPINGS,
+    )
+    assert result is not None
+
+    out = Document(io.BytesIO(result)).paragraphs[0]
+    assert out.text == "Max Müller (siehe www.firma.de)"
+    assert out.hyperlinks[0].text == "www.firma.de"
+    assert "www.firma.de" not in "".join(run.text for run in out.runs)
 
 
 def test_reidentify_docx_no_pseudonyms():
@@ -173,3 +244,39 @@ def test_unsupported_image():
 def test_empty_mappings():
     result = reidentify_file_bytes(b"hello", "text/plain", {})
     assert result is None
+
+
+def test_reidentify_docx_blind_spot_surfaces():
+    """Reveal must reach every surface the redactor can place a pseudonym on."""
+    from docx import Document
+
+    from tests.file_analysis.docx_helpers import (
+        add_block_sdt,
+        add_endnotes_part,
+        add_footnotes_part,
+        add_nested_table,
+        add_textbox_paragraph,
+        all_xml,
+        docx_bytes,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Report by <<PERSON_1>>")
+    add_block_sdt(doc, "Bearbeiter: <<PERSON_1>>")
+    add_nested_table(doc, outer_text="Outer", inner_text="Kontakt: <<EMAIL_1>>")
+    add_textbox_paragraph(doc, "Box: <<PERSON_1>>")
+    add_footnotes_part(doc, "Fussnote: <<PERSON_1>>")
+    add_endnotes_part(doc, "Endnote: <<EMAIL_1>>")
+
+    result = reidentify_file_bytes(
+        docx_bytes(doc),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        MAPPINGS,
+    )
+    assert result is not None
+
+    xml = all_xml(result)
+    assert b"<<PERSON_1>>" not in xml
+    assert b"<<EMAIL_1>>" not in xml
+    assert "Max Müller".encode() in xml
+    assert b"max@test.de" in xml

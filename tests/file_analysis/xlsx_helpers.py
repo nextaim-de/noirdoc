@@ -153,6 +153,10 @@ def inject_pivot(
     captions: dict[str, str] | None = None,
     group_items: list[str] | None = None,
     table_sheets: list[str] | None = None,
+    data_caption: str = "Werte",
+    item_captions: dict[int, str] | None = None,
+    page_field: tuple[str, str] | None = None,
+    label_filter: str | None = None,
 ) -> bytes:
     """Splice one pivot cache (+ ``tables`` pivot tables sharing it) into *xlsx*.
 
@@ -162,6 +166,12 @@ def inject_pivot(
     ``captions`` adds ``c="…"`` to matching shared items; ``group_items`` adds a
     ``fieldGroup/groupItems`` list to the first field; ``table_sheets`` places
     table *n* on ``table_sheets[n-1]`` (default: all on ``sheet_part``).
+
+    Table-level extras (applied to every generated table): ``data_caption`` sets
+    ``dataCaption``; ``item_captions`` adds ``n="…"`` captions to row items by
+    index; ``page_field`` adds a ``pageField`` (name, cap) on field 0;
+    ``label_filter`` adds a caption filter on field 0 with ``stringValue1`` and
+    the nested autofilter mirror Excel writes alongside it.
     """
     cache_fields = []
     for index, (name, shared) in enumerate(fields):
@@ -218,8 +228,35 @@ def inject_pivot(
 
     first_shared = fields[0][1] or []
     row_items = (
-        "".join(f'<item x="{i}"/>' for i in range(len(first_shared))) + '<item t="default"/>'
+        "".join(
+            f'<item x="{i}"'
+            + (
+                f' n="{html.escape(item_captions[i], quote=True)}"'
+                if item_captions and i in item_captions
+                else ""
+            )
+            + "/>"
+            for i in range(len(first_shared))
+        )
+        + '<item t="default"/>'
     )
+    page_fields = ""
+    if page_field is not None:
+        name, cap = page_field
+        page_fields = (
+            f'<pageFields count="1"><pageField fld="0" item="0" hier="-1" '
+            f'name="{html.escape(name, quote=True)}" cap="{html.escape(cap, quote=True)}"/>'
+            "</pageFields>"
+        )
+    filters = ""
+    if label_filter is not None:
+        value = html.escape(label_filter, quote=True)
+        filters = (
+            f'<filters count="1"><filter fld="0" type="captionEqual" evalOrder="-1" id="1" '
+            f'stringValue1="{value}"><autoFilter ref="A1"><filterColumn colId="0">'
+            f'<customFilters><customFilter val="{value}"/></customFilters>'
+            "</filterColumn></autoFilter></filter></filters>"
+        )
     row_axis_items = (
         "".join(f'<i><x v="{i}"/></i>' if i else "<i><x/></i>" for i in range(len(first_shared)))
         + '<i t="grand"><x/></i>'
@@ -228,7 +265,8 @@ def inject_pivot(
     def _table(n: int) -> str:
         return (
             f'{_XML_HEAD}<pivotTableDefinition xmlns="{_NS_MAIN}" name="PivotTable{n}" '
-            f'cacheId="{cache_id}" dataCaption="Werte" updatedVersion="6" minRefreshableVersion="3" '
+            f'cacheId="{cache_id}" dataCaption="{html.escape(data_caption, quote=True)}" '
+            f'updatedVersion="6" minRefreshableVersion="3" '
             f'useAutoFormatting="1" itemPrintTitles="1" createdVersion="6" indent="0" outline="1" '
             f'outlineData="1" multipleFieldFilters="0">'
             f'<location ref="D{1 + (n - 1) * 10}:E{4 + (n - 1) * 10}" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/>'
@@ -238,8 +276,10 @@ def inject_pivot(
             + '</pivotFields><rowFields count="1"><field x="0"/></rowFields>'
             f'<rowItems count="{len(first_shared) + 1}">{row_axis_items}</rowItems>'
             '<colItems count="1"><i/></colItems>'
+            f"{page_fields}"
             f'<dataFields count="1"><dataField name="Summe von {html.escape(fields[1][0], quote=True)}" '
             'fld="1" baseField="0" baseItem="0"/></dataFields>'
+            f"{filters}"
             '<pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1" showColHeaders="1" '
             'showRowStripes="0" showColStripes="0" showLastColumn="1"/></pivotTableDefinition>'
         )
@@ -289,6 +329,114 @@ def inject_pivot(
         f'Target="pivotCache/pivotCacheDefinition{cache_id}.xml"/>',
     )
     return add_content_types(rewrite_zip(xlsx, edits), overrides)
+
+
+_NS_C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+_NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_NS_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+
+
+def inject_chart(
+    xlsx: bytes,
+    *,
+    title: str,
+    series_name: str,
+    categories: list[str],
+    values: list[float] | None = None,
+    axis_title: str | None = None,
+    source_sheet: str = "Daten",
+    sheet_part: str = "sheet1",
+) -> bytes:
+    """Splice an Excel-style bar chart into *xlsx*, string caches included.
+
+    openpyxl-authored charts carry no ``strCache``/``numCache``, but Excel
+    always writes a cache of the source cells — that cache is what keeps
+    rendering the original names after the sheet cells were pseudonymized.
+    """
+    values = values if values is not None else [float(10 * (i + 1)) for i in range(len(categories))]
+
+    def _rich(text: str) -> str:
+        return (
+            f"<c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>{html.escape(text, quote=False)}</a:t>"
+            "</a:r></a:p></c:rich></c:tx>"
+        )
+
+    cat_pts = "".join(
+        f'<c:pt idx="{i}"><c:v>{html.escape(c, quote=False)}</c:v></c:pt>'
+        for i, c in enumerate(categories)
+    )
+    val_pts = "".join(f'<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>' for i, v in enumerate(values))
+    n = len(categories)
+    cat_axis_title = (
+        f'<c:title>{_rich(axis_title)}<c:overlay val="0"/></c:title>' if axis_title else ""
+    )
+    chart = (
+        f'{_XML_HEAD}<c:chartSpace xmlns:c="{_NS_C}" xmlns:a="{_NS_A}" xmlns:r="{_NS_R}">'
+        f'<c:chart><c:title>{_rich(title)}<c:overlay val="0"/></c:title>'
+        "<c:plotArea><c:layout/>"
+        '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+        '<c:ser><c:idx val="0"/><c:order val="0"/>'
+        f"<c:tx><c:strRef><c:f>{source_sheet}!$B$1</c:f><c:strCache>"
+        f'<c:ptCount val="1"/><c:pt idx="0"><c:v>{html.escape(series_name, quote=False)}</c:v>'
+        "</c:pt></c:strCache></c:strRef></c:tx>"
+        f"<c:cat><c:strRef><c:f>{source_sheet}!$A$2:$A${n + 1}</c:f><c:strCache>"
+        f'<c:ptCount val="{n}"/>{cat_pts}</c:strCache></c:strRef></c:cat>'
+        f"<c:val><c:numRef><c:f>{source_sheet}!$B$2:$B${n + 1}</c:f><c:numCache>"
+        f'<c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{val_pts}'
+        "</c:numCache></c:numRef></c:val>"
+        "</c:ser>"
+        '<c:axId val="1"/><c:axId val="2"/></c:barChart>'
+        '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+        f'<c:delete val="0"/><c:axPos val="b"/>{cat_axis_title}<c:crossAx val="2"/></c:catAx>'
+        '<c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+        '<c:delete val="0"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx>'
+        '</c:plotArea><c:plotVisOnly val="1"/></c:chart></c:chartSpace>'
+    )
+    drawing = (
+        f'{_XML_HEAD}<xdr:wsDr xmlns:xdr="{_NS_XDR}" xmlns:a="{_NS_A}">'
+        "<xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff>"
+        "<xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+        '<xdr:ext cx="4572000" cy="3429000"/>'
+        '<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr>'
+        '<xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>'
+        '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+        f'<a:graphic><a:graphicData uri="{_NS_C}">'
+        f'<c:chart xmlns:c="{_NS_C}" xmlns:r="{_NS_R}" r:id="rId1"/></a:graphicData></a:graphic>'
+        "</xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"
+    )
+    drawing_rels = (
+        f'{_XML_HEAD}<Relationships xmlns="{_NS_PKG}"><Relationship Id="rId1" '
+        f'Type="{_REL}/chart" Target="../charts/chart1.xml"/></Relationships>'
+    )
+    sheet_rels = _append_before(
+        _relationships(xlsx, f"xl/worksheets/_rels/{sheet_part}.xml.rels"),
+        b"</Relationships>",
+        f'<Relationship Id="rIdD1" Type="{_REL}/drawing" Target="../drawings/drawing1.xml"/>',
+    )
+    sheet_xml = _append_before(
+        read_part(xlsx, f"xl/worksheets/{sheet_part}.xml"),
+        b"</worksheet>",
+        f'<drawing xmlns:r="{_NS_R}" r:id="rIdD1"/>',
+    )
+    out = rewrite_zip(
+        xlsx,
+        {
+            "xl/charts/chart1.xml": chart.encode(),
+            "xl/drawings/drawing1.xml": drawing.encode(),
+            "xl/drawings/_rels/drawing1.xml.rels": drawing_rels.encode(),
+            f"xl/worksheets/_rels/{sheet_part}.xml.rels": sheet_rels,
+            f"xl/worksheets/{sheet_part}.xml": sheet_xml,
+        },
+    )
+    return add_content_types(
+        out,
+        [
+            (
+                "/xl/charts/chart1.xml",
+                "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+            )
+        ],
+    )
 
 
 def inject_threaded_comment_parts(xlsx: bytes, *, display_name: str, text: str) -> bytes:

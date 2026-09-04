@@ -2,11 +2,15 @@
 
 Replaces <<TYPE_N>> tokens with original values in supported formats:
 
-* **DOCX** – python-docx paragraph runs + table cells in body, headers/footers
-  and comments, plus package parts (docProps, comment authors, people.xml)
-  via :mod:`noirdoc.file_analysis.docx_parts`
-* **XLSX** – openpyxl cell values plus docProps, comments, headers/footers and
-  pivot caches (via :mod:`noirdoc.file_analysis.xlsx_parts`)
+* **DOCX** – every text surface via the shared walker in
+  :mod:`noirdoc.file_analysis.docx_surfaces` (body incl. content controls,
+  nested tables, text boxes and tracked changes; headers/footers; comments;
+  footnotes/endnotes), plus the package parts (docProps, comment authors,
+  ``word/people.xml``) via :mod:`noirdoc.file_analysis.docx_parts`
+* **XLSX** – openpyxl cell values plus every part-level surface enumerated by
+  :mod:`noirdoc.file_analysis.xlsx_parts` (docProps, comments, headers/footers,
+  pivot caches and table captions, chart caches/titles, hyperlinks, filter and
+  validation criteria)
 * **Plain text** (TXT/CSV/MD/HTML) – simple string replacement
 
 Returns ``None`` for unsupported formats (PDF, PPTX, images) so the
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 import io
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -25,8 +29,6 @@ from noirdoc.mappings.hydration import hydrate_mapper
 from noirdoc.reidentification.engine import ReidentificationEngine
 
 if TYPE_CHECKING:
-    from docx.text.paragraph import Paragraph
-
     from noirdoc.pseudonymization.mapper import PseudonymMapper
 
 logger = structlog.get_logger()
@@ -92,16 +94,19 @@ def _reidentify_text(
 def _reidentify_docx(
     file_bytes: bytes, engine: ReidentificationEngine, mapper: PseudonymMapper
 ) -> bytes | None:
-    """Walk every DOCX surface the redact side writes and reidentify it.
+    """Reidentify pseudonyms across every DOCX text surface and package part.
 
-    Mirrors ``_reconstruct_docx``: body, section headers/footers and comment
-    text as block containers, plus the package parts (docProps, comment
-    authors/initials, ``word/people.xml``) via the same slot enumerator the
-    redact side uses, so the two walkers cannot drift apart.
+    Both walkers are the ones the redact side writes through, so neither pair
+    can drift apart: :mod:`noirdoc.file_analysis.docx_surfaces` for the text
+    (body incl. content controls, nested tables, text boxes and tracked
+    changes; headers/footers; comments; footnotes/endnotes), and
+    :mod:`noirdoc.file_analysis.docx_parts` for the package parts (docProps,
+    comment authors/initials, ``word/people.xml``).
     """
     from docx import Document
 
     from noirdoc.file_analysis.docx_parts import reidentify_document_parts
+    from noirdoc.file_analysis.docx_surfaces import rewrite_document_texts
 
     try:
         doc = Document(io.BytesIO(file_bytes))
@@ -109,21 +114,12 @@ def _reidentify_docx(
         logger.warning("file_reident.docx_load_failed")
         return None
 
-    changed = _reidentify_block_container(doc, engine, mapper)
+    def transform(text: str) -> str:
+        if not _PSEUDO_PATTERN.search(text):
+            return text
+        return engine.reidentify(text, mapper)
 
-    for section in doc.sections:
-        for header in (section.header, section.first_page_header, section.even_page_header):
-            changed |= _reidentify_block_container(header, engine, mapper)
-        for footer in (section.footer, section.first_page_footer, section.even_page_footer):
-            changed |= _reidentify_block_container(footer, engine, mapper)
-
-    try:
-        comments = list(doc.comments)
-    except Exception:
-        comments = []
-    for comment in comments:
-        changed |= _reidentify_block_container(comment, engine, mapper)
-
+    changed = rewrite_document_texts(doc, transform, strip_deleted=False)
     if reidentify_document_parts(doc, engine, mapper):
         changed = True
 
@@ -133,42 +129,6 @@ def _reidentify_docx(
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-def _reidentify_block_container(
-    container: Any, engine: ReidentificationEngine, mapper: PseudonymMapper
-) -> bool:
-    """Reidentify every paragraph in *container* (incl. its tables)."""
-    changed = False
-    for para in container.paragraphs:
-        if _reidentify_paragraph(para, engine, mapper):
-            changed = True
-    for table in container.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if _reidentify_paragraph(para, engine, mapper):
-                        changed = True
-    return changed
-
-
-def _reidentify_paragraph(
-    para: Paragraph, engine: ReidentificationEngine, mapper: PseudonymMapper
-) -> bool:
-    """Reidentify text in a paragraph's runs. Returns True if changed."""
-    full_text = para.text
-    if not _PSEUDO_PATTERN.search(full_text):
-        return False
-
-    new_text = engine.reidentify(full_text, mapper)
-    if new_text == full_text:
-        return False
-
-    if para.runs:
-        para.runs[0].text = new_text
-        for run in para.runs[1:]:
-            run.text = ""
-    return True
 
 
 def _reidentify_xlsx(

@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/nextaim-de/noirdoc/main/docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
+  <img src="https://raw.githubusercontent.com/noirdoc-ai/mask-engine/main/docs/assets/banner.svg" alt="noirdoc — German-first PII redaction, local by default." width="800">
 </p>
 
 <p align="center">
-  <a href="https://github.com/nextaim-de/noirdoc/actions/workflows/ci.yml"><img src="https://github.com/nextaim-de/noirdoc/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/noirdoc-ai/mask-engine/actions/workflows/ci.yml"><img src="https://github.com/noirdoc-ai/mask-engine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue" alt="Python 3.12 | 3.13">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT">
   <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen" alt="pre-commit enabled"></a>
@@ -43,7 +43,8 @@ For anything beyond toy examples, use `noirdoc[full]` — the ensemble catches w
 
 ```bash
 # One-shot redact (ephemeral mapping, discarded on exit).
-noirdoc redact vertrag.pdf -o vertrag-clean.pdf
+# PDFs come back as masked plain text, so the output is a .txt file.
+noirdoc redact vertrag.pdf -o vertrag-clean.txt
 
 # Persistent namespace — placeholders stay consistent across files and sessions.
 noirdoc redact --namespace mandant-mueller brief.docx -o brief-clean.docx
@@ -55,7 +56,7 @@ noirdoc lookup --namespace mandant-mueller "<<PERSON_3>>"
 from noirdoc import Redactor
 
 r = Redactor(namespace="mandant-mueller")
-r.redact_file("vertrag.pdf", output="vertrag-clean.pdf")
+r.redact_file("vertrag.pdf", output="vertrag-clean.txt")  # PDFs fall back to plain text
 r.redact_file("brief.docx", output="brief-clean.docx")
 r.reveal_text(llm_response)  # un-redact the model's reply
 ```
@@ -88,9 +89,12 @@ Run `noirdoc <cmd> --help` for the full flag list on any subcommand.
 A few honest caveats before you ship this into a pipeline:
 
 - **Best results need `[full]`.** On first use (or via `noirdoc models pull`) the full extra downloads roughly **560 MB** of weights: spaCy `de_core_news_lg`, Flair `ner-german-large`, and a GLiNER multilingual model. Budget disk and bandwidth.
+- **Not every format survives redaction with formatting intact.** PDFs and images always come back as masked plain text, and DOCX/XLSX fall back to plain text when reconstruction fails. You can tell it happened by three signals: the CLI writes `*_redacted.txt` (an explicit non-`.txt` `-o` target is redirected to `<stem>.txt` with a warning on stderr), and the SDK's `RedactionResult` has `mime_type="text/plain"` and `reconstructed=False`, with `reason` saying why. A `.docx`/`.xlsx` path never silently receives UTF-8 text.
 - **PDF reveal is not supported yet.** Round-tripping placeholders back into a PDF is a hard problem (position drift, font metrics, image-based redactions). PDFs redact cleanly; reveal is pass-through. DOCX, XLSX, and plain text round-trip.
-- **XLSX output is re-serialized by openpyxl.** Redaction covers cells, `docProps` (core + custom properties), cell comments, headers/footers and pivot caches, and reveals them all. Threaded comments, `xl/persons` and `app.xml` Manager/Company are dropped on write (counted, not reversible); shapes, slicers, macros and other parts openpyxl cannot model do not survive the round-trip. Not covered yet: chart value caches and titles, hyperlink targets and tooltips, AutoFilter criteria, conditional-formatting literals, data-validation lists and prompts, pivot-table captions and label filters, defined names, sheet titles.
-- **DOCX metadata is scrubbed and reversible.** DOCX redaction rewrites body, header/footer and comment text, and pseudonymizes `docProps` (core creator/lastModifiedBy/title/…, `app.xml` Manager/Company/HyperlinkBase/TitlesOfParts, custom properties), comment authors/initials and `word/people.xml` identities — all reversible via `noirdoc reveal`. The `docProps/thumbnail.jpeg` preview (a rendered image of the original page) and `customXml/` data islands cannot be pseudonymized and are dropped on write — reported separately from the entity count, because carrying them says nothing about whether a document holds PII (most Word templates ship both). Not covered yet: footnotes/endnotes, text boxes, tracked-change author attributes (`w:ins`/`w:del`), field codes, embedded objects.
+- **XLSX output is re-serialized by openpyxl.** Redaction covers cells, `docProps` (core + custom properties), cell comments, headers/footers, pivot caches, chart string caches and titles, hyperlink tooltips/display and `mailto:` targets (the placeholder is percent-encoded in the target — `mailto:%3C%3CEMAIL_1%3E%3E` — because `<`/`>` are illegal URI characters; reveal decodes it back), AutoFilter criteria, conditional-formatting text criteria and string-literal formulas, data-validation inline lists and prompts, and pivot-table captions and label filters — and reveals them all. Threaded comments, `xl/persons` and `app.xml` Manager/Company are dropped on write (counted, not reversible); shapes, slicers, macros and other parts openpyxl cannot model do not survive the round-trip. Not covered yet: non-`mailto:` hyperlink URL targets, defined names and sheet titles (both would require rewriting every formula that references them).
+- **DOCX redaction covers the text surfaces and the package metadata.** One shared walker drives extraction, redaction and reveal over the XML, covering: body text, content controls (`w:sdt`), tables nested at any depth, text boxes and shapes (both `mc:AlternateContent` branches on rewrite), tracked changes (inserted text is redacted like any other; deleted text is shown to the detector, then stripped from the output entirely — it is not reversible), headers/footers, review comments, and footnotes/endnotes. Inline pictures, line breaks and tab stops survive the rewrite, and a placeholder inside a hyperlink stays inside the hyperlink. A second walker pseudonymizes the package parts — `docProps` (core creator/lastModifiedBy/title/…, `app.xml` Manager/Company/HyperlinkBase/TitlesOfParts, custom properties), comment authors/initials and `word/people.xml` identities — reversibly. The `docProps/thumbnail.jpeg` preview (a rendered image of the original page) and `customXml/` data islands cannot be pseudonymized and are dropped on write, reported separately from the entity count because carrying them says nothing about whether a document holds PII (most Word templates ship both). Not covered yet: hyperlink relationship targets ([#27]), field instructions (`w:instrText` — mail-merge field codes), tracked-change author attributes, image alt text, and embedded objects.
+
+[#27]: https://github.com/noirdoc-ai/mask-engine/issues/27
 - **Alpha API.** Classes and CLI flags may change between `0.1.x` and `0.2.x`. Pin accordingly.
 - **Detector quality depends on the upstream models.** Presidio + Flair + GLiNER do the heavy lifting. Noirdoc adds German-specific recognizers on top, but it does not train models.
 
@@ -119,7 +123,7 @@ If you're working with German legal, medical, HR, or financial documents, this i
 | Plain text / CSV / MD / HTML | ✓      | ✓                   |
 | PPTX / images                | ✓      | ✗ (pass-through)    |
 
-PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md).
+PDF reveal is an open contribution target — see [CONTRIBUTING.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CONTRIBUTING.md).
 
 ## Advanced: shared mapping storage
 
@@ -165,19 +169,19 @@ Run `make help` for the full list of targets (also: `make lint`, `make fmt`, `ma
 
 ## Contributing
 
-Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](https://github.com/nextaim-de/noirdoc/blob/main/CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
+Bug reports, detectors, and format support are all welcome. See [CONTRIBUTING.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CONTRIBUTING.md) for dev setup, tests, and the recognizer pattern.
 
 ## Security
 
-Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](https://github.com/nextaim-de/noirdoc/blob/main/SECURITY.md). Please don't open public issues for security bugs.
+Report vulnerabilities via GitHub's private vulnerability reporting — see [SECURITY.md](https://github.com/noirdoc-ai/mask-engine/blob/main/SECURITY.md). Please don't open public issues for security bugs.
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/nextaim-de/noirdoc/blob/main/CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
+See [CHANGELOG.md](https://github.com/noirdoc-ai/mask-engine/blob/main/CHANGELOG.md). Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [SemVer](https://semver.org/).
 
 ## License
 
-MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](https://github.com/nextaim-de/noirdoc/blob/main/LICENSE).
+MIT © 2026 Antonio Maiolo / [Nextaim GmbH](https://nextaim.de). See [LICENSE](https://github.com/noirdoc-ai/mask-engine/blob/main/LICENSE).
 
 ---
 
