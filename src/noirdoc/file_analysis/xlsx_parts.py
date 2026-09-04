@@ -578,6 +578,30 @@ def _placeholder_type(placeholder: str, default: str) -> str:
     return match.group(1) if match else default
 
 
+def _needs_detection(slot: _Slot, mapper: PseudonymMapper) -> bool:
+    """Whether *slot*'s text has to go through the detector at all.
+
+    ``free`` text always does. A ``filter`` slot (criterion, caption, chart
+    cache point) mirrors a cell value and the cell pass ran first, so when the
+    mapper already knows the value — or the slot already holds one of its
+    placeholders — the redact loop takes the lookup fast path below and never
+    reads the detector's answer. Chart caches mirror whole columns, so
+    detecting them anyway costs one NER call per distinct cell for nothing.
+
+    Keep this in lockstep with the ``filter`` branch of the redact loop: the
+    two conditions it short-circuits on are exactly the two tested here.
+    """
+    if slot.kind == "free":
+        return True
+    if slot.kind != "filter":
+        return False
+    value = slot.value
+    if value is None:
+        return False
+    core = value.strip()
+    return mapper.reverse_lookup(core) is None and mapper.lookup(core) is None
+
+
 async def _detect_all(
     texts: list[str], detector: DetectorLike, language: str
 ) -> list[list[DetectedEntity]]:
@@ -661,8 +685,9 @@ async def pseudonymize_workbook_parts(
     slots = [s for s in iter_text_slots(wb) if s.value is not None]
 
     # Detect each distinct free text once — thousands of identical "ok" comments are common.
-    # "filter" slots fall back to the detector when the mapper does not know them.
-    free_indexes = [i for i, s in enumerate(slots) if s.kind in ("free", "filter")]
+    # "filter" slots only fall back to the detector when the mapper does not know them
+    # already; the ones it does know take the lookup fast path and never read this.
+    free_indexes = [i for i, s in enumerate(slots) if _needs_detection(s, mapper)]
     unique_texts: dict[str, int] = {}
     for i in free_indexes:
         text = slots[i].value

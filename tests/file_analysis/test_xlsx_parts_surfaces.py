@@ -19,6 +19,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.filters import CustomFilter, CustomFilters, FilterColumn, Filters
 from openpyxl.worksheet.hyperlink import Hyperlink
 
+from noirdoc.detection.base import DetectedEntity
 from noirdoc.file_analysis.xlsx_inference import pseudonymize_xlsx_smart
 from noirdoc.file_analysis.xlsx_parts import pseudonymize_workbook_parts
 from noirdoc.file_reidentification.service import reidentify_file_bytes
@@ -99,6 +100,37 @@ async def test_chart_cache_value_known_to_mapper_reuses_cell_placeholder():
     assert result.classifications["chart1.series1.cat@sheet1"] == "PERSON (mapped)"
     # title/series name are free text: no detector hit, no mapper full-match — left alone.
     assert wb["Daten"]._charts[0].title.tx.rich.p[0].r[0].t == "Umsatz Anna Mueller"
+
+
+async def test_mirrored_values_the_mapper_knows_are_not_sent_to_the_detector():
+    """A cache point the cell pass already mapped takes the lookup fast path.
+
+    Chart caches and filter criteria mirror whole columns, so detecting them
+    anyway would cost one NER call per distinct cell and throw every answer
+    away — the exact cost issue #11 is about.
+    """
+
+    class CountingDetector:
+        def __init__(self) -> None:
+            self.seen: list[str] = []
+
+        async def detect(self, text: str, language: str = "de") -> list[DetectedEntity]:
+            self.seen.append(text)
+            return []
+
+    wb = load_workbook(io.BytesIO(_chart_workbook()))
+    mapper = PseudonymMapper()
+    mapper.get_or_create("Anna Mueller", "PERSON")
+    mapper.get_or_create("Ben Schulz", "PERSON")
+    detector = CountingDetector()
+
+    await pseudonymize_workbook_parts(wb, detector, mapper, "de")
+
+    # Both category points are known; neither reaches the detector.
+    assert "Anna Mueller" not in detector.seen
+    assert "Ben Schulz" not in detector.seen
+    # Free text still does — the chart title is not a mirrored cell value.
+    assert "Umsatz Anna Mueller" in detector.seen
 
 
 # ── hyperlinks ───────────────────────────────────────────
